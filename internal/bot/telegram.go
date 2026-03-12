@@ -12,6 +12,7 @@ import (
 
 	"github.com/lustan3216/goclaudeclaw/internal/config"
 	"github.com/lustan3216/goclaudeclaw/internal/runner"
+	"github.com/lustan3216/goclaudeclaw/internal/session"
 )
 
 // Bot 封装单个 Telegram bot 的生命周期。
@@ -26,11 +27,17 @@ func NewBot(
 	botCfg config.BotConfig,
 	globalCfg *config.Config,
 	runnerMgr *runner.Manager,
+	sessionMgr *session.Manager,
 	workspace string,
 ) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(botCfg.Token)
 	if err != nil {
 		return nil, err
+	}
+
+	// 若 bot 配置未设置 name，使用 Telegram 返回的 username 作为默认值
+	if botCfg.Name == "" {
+		botCfg.Name = api.Self.UserName
 	}
 
 	// 生产环境关闭调试日志，避免 token 泄漏
@@ -40,7 +47,7 @@ func NewBot(
 		"bot_name", botCfg.Name,
 		"username", api.Self.UserName)
 
-	dispatcher := NewDispatcher(api, botCfg, globalCfg, runnerMgr, workspace)
+	dispatcher := NewDispatcher(api, botCfg, globalCfg, runnerMgr, sessionMgr, workspace)
 
 	return &Bot{
 		api:        api,
@@ -104,8 +111,6 @@ func (b *Bot) Run(ctx context.Context) {
 // reconnect 重新建立 Telegram 更新 channel，带指数退避重试。
 // 返回新 channel，如果 ctx 被取消则返回 nil。
 func (b *Bot) reconnect(ctx context.Context) tgbotapi.UpdatesChannel {
-	// GetUpdatesChan 本身不返回错误，一次调用即可。
-	// 上层调用方已经等待了 3 秒，此处直接重建 channel。
 	select {
 	case <-ctx.Done():
 		return nil
@@ -128,10 +133,11 @@ type Manager struct {
 func NewManager(
 	cfg *config.Config,
 	runnerMgr *runner.Manager,
+	sessionMgr *session.Manager,
 ) (*Manager, error) {
 	var bots []*Bot
 	for _, botCfg := range cfg.Bots {
-		b, err := NewBot(botCfg, cfg, runnerMgr, cfg.Workspace)
+		b, err := NewBot(botCfg, cfg, runnerMgr, sessionMgr, cfg.Workspace)
 		if err != nil {
 			return nil, err
 		}

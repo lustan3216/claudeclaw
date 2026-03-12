@@ -5,6 +5,7 @@ package runner
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -25,9 +26,20 @@ type Result struct {
 type Job struct {
 	Ctx       context.Context
 	Workspace string
+	BotName   string // bot 名称，用于会话键
+	ChatID    int64  // Telegram chat ID
+	TopicID   int    // Telegram topic ID（论坛话题），0 表示普通聊天
 	Prompt    string
 	Mode      TaskMode
 	ResultCh  chan<- Result // 调用方监听此 channel 获取结果
+}
+
+// claudeJSONOutput claude --output-format json 的输出结构。
+// 新会话时使用此格式捕获 session_id。
+type claudeJSONOutput struct {
+	SessionID string `json:"session_id"`
+	Result    string `json:"result"`
+	// 其他字段按需扩展
 }
 
 // Manager 管理所有 workspace 的串行执行队列。
@@ -104,21 +116,28 @@ func (m *Manager) runQueue(workspace string, q <-chan Job) {
 }
 
 // execute 实际执行 claude CLI，返回输出结果。
+// 逻辑：
+//   - 有已知 session → --output-format text --resume {sessionID}
+//   - 无 session（新会话）→ --output-format json，从 JSON 输出解析 session_id 并持久化
 func (m *Manager) execute(job Job) Result {
-	sessionID := m.sessions.Get(job.Workspace)
+	sessionID := m.sessions.Get(job.Workspace, job.BotName, job.ChatID, job.TopicID)
+	isNewSession := sessionID == ""
 
 	args := m.buildArgs(job, sessionID)
 
 	slog.Info("执行 claude",
 		"workspace", job.Workspace,
+		"bot", job.BotName,
+		"chat_id", job.ChatID,
+		"topic_id", job.TopicID,
 		"mode", job.Mode,
 		"session_id", sessionID,
-		"args_count", len(args))
+		"new_session", isNewSession)
 
 	cmd := exec.CommandContext(job.Ctx, m.claudePath, args...)
 	cmd.Dir = job.Workspace
 
-	// 流式读取输出，实时拼接
+	// 流式读取输出
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return Result{Err: fmt.Errorf("获取 stdout pipe 失败: %w", err)}
@@ -166,17 +185,39 @@ func (m *Manager) execute(job Job) Result {
 		}
 	}
 
-	output := strings.TrimSpace(outputBuilder.String())
+	rawOutput := strings.TrimSpace(outputBuilder.String())
 
-	// 尝试从输出中提取新的 session ID 并持久化
-	// claude 在 --resume 模式下会在输出末尾附加 session ID（格式: [session: <id>]）
-	if newID := extractSessionID(output); newID != "" && newID != sessionID {
-		if err := m.sessions.Set(job.Workspace, newID); err != nil {
-			slog.Warn("持久化 session ID 失败", "err", err)
+	// 新会话：解析 JSON 输出，提取 session_id
+	if isNewSession {
+		if jsonOut, err := parseJSONOutput(rawOutput); err == nil && jsonOut.SessionID != "" {
+			if err := m.sessions.Set(job.Workspace, job.BotName, job.ChatID, job.TopicID, jsonOut.SessionID); err != nil {
+				slog.Warn("持久化 session ID 失败", "err", err)
+			} else {
+				slog.Info("新会话已创建并持久化",
+					"session_id", jsonOut.SessionID,
+					"bot", job.BotName,
+					"chat_id", job.ChatID,
+					"topic_id", job.TopicID)
+			}
+			return Result{Output: strings.TrimSpace(jsonOut.Result)}
+		}
+		// JSON 解析失败时降级：尝试旧格式 session ID 提取
+		if newID := extractSessionID(rawOutput); newID != "" {
+			if err := m.sessions.Set(job.Workspace, job.BotName, job.ChatID, job.TopicID, newID); err != nil {
+				slog.Warn("持久化 session ID 失败（降级模式）", "err", err)
+			}
+		}
+		return Result{Output: rawOutput}
+	}
+
+	// 已有会话（--resume 模式）：纯文本输出，检查是否有新 session ID（轮换情况）
+	if newID := extractSessionID(rawOutput); newID != "" && newID != sessionID {
+		if err := m.sessions.Set(job.Workspace, job.BotName, job.ChatID, job.TopicID, newID); err != nil {
+			slog.Warn("持久化新 session ID 失败", "err", err)
 		}
 	}
 
-	return Result{Output: output}
+	return Result{Output: rawOutput}
 }
 
 // buildArgs 根据任务配置组装 claude 命令行参数。
@@ -194,18 +235,21 @@ func (m *Manager) buildArgs(job Job, sessionID string) []string {
 	case "moderate", "strict":
 		// moderate/strict 依赖 claude 自身的确认机制，不额外传参
 	case "locked":
-		// locked 模式：只读，通过 system prompt 约束（TODO: 注入 system prompt）
+		// locked 模式：只读，通过 system prompt 约束
 	}
 
-	// 恢复会话
 	if sessionID != "" {
+		// 已有会话：使用文本输出格式恢复会话
+		args = append(args, "--output-format", "text")
 		args = append(args, "--resume", sessionID)
+	} else {
+		// 新会话：使用 JSON 输出格式，捕获 session_id
+		args = append(args, "--output-format", "json")
 	}
 
 	// 单次 prompt 模式（非交互）
 	args = append(args, "-p", job.Prompt)
 
-	// 后台任务：添加输出格式标记，方便日志解析（可根据实际 claude 版本调整）
 	if job.Mode == ModeBackground {
 		slog.Debug("后台任务，使用静默执行模式")
 	}
@@ -213,7 +257,25 @@ func (m *Manager) buildArgs(job Job, sessionID string) []string {
 	return args
 }
 
-// extractSessionID 从 claude 输出中提取会话 ID。
+// parseJSONOutput 解析 claude --output-format json 的输出。
+// claude 可能输出多行，取最后一行（或第一个有效 JSON 对象）。
+func parseJSONOutput(output string) (*claudeJSONOutput, error) {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	// 从最后一行往前找，取第一个能解析成功的 JSON
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var out claudeJSONOutput
+		if err := json.Unmarshal([]byte(line), &out); err == nil {
+			return &out, nil
+		}
+	}
+	return nil, fmt.Errorf("未找到有效 JSON 输出")
+}
+
+// extractSessionID 从 claude 输出中提取会话 ID（旧格式兼容）。
 // claude 输出格式可能为: [session: abc123] 或 Session ID: abc123
 func extractSessionID(output string) string {
 	for _, line := range strings.Split(output, "\n") {

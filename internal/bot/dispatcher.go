@@ -1,4 +1,6 @@
 // Package bot 实现 Telegram 消息路由、防抖和前台/后台任务分发。
+// 支持 Telegram 论坛话题（Forum Topics）：每个 topic 拥有独立的 Claude 会话，
+// topicID=0 表示普通聊天（非话题消息）。
 package bot
 
 import (
@@ -13,17 +15,25 @@ import (
 
 	"github.com/lustan3216/goclaudeclaw/internal/config"
 	"github.com/lustan3216/goclaudeclaw/internal/runner"
+	"github.com/lustan3216/goclaudeclaw/internal/session"
 )
 
 // incomingMsg 是防抖窗口内收集的原始消息。
 type incomingMsg struct {
-	text     string
-	from     string
-	chatID   int64
+	text       string
+	from       string
+	chatID     int64
+	topicID    int // 0 = 普通聊天，>0 = 论坛话题 ID
 	receivedAt time.Time
 }
 
-// debounceState 跟踪每个 chat 的防抖状态。
+// chatTopicKey 唯一标识一个 chat+topic 的防抖/会话键。
+type chatTopicKey struct {
+	chatID  int64
+	topicID int
+}
+
+// debounceState 跟踪每个 chat+topic 的防抖状态。
 type debounceState struct {
 	timer    *time.Timer
 	messages []incomingMsg
@@ -31,12 +41,13 @@ type debounceState struct {
 }
 
 // Dispatcher 负责消息路由和防抖聚合。
-// 每个 bot 实例共享同一个 Dispatcher，通过 chatID 区分会话。
+// 每个 bot 实例共享同一个 Dispatcher，通过 chatID+topicID 区分会话。
 type Dispatcher struct {
 	mu       sync.Mutex
-	debounce map[int64]*debounceState // chatID → 防抖状态
+	debounce map[chatTopicKey]*debounceState // chat+topic → 防抖状态
 
 	runnerMgr  *runner.Manager
+	sessionMgr *session.Manager
 	classifier *runner.Classifier
 	cfg        *config.Config
 	botCfg     config.BotConfig
@@ -50,11 +61,13 @@ func NewDispatcher(
 	botCfg config.BotConfig,
 	cfg *config.Config,
 	runnerMgr *runner.Manager,
+	sessionMgr *session.Manager,
 	workspace string,
 ) *Dispatcher {
 	return &Dispatcher{
-		debounce:   make(map[int64]*debounceState),
+		debounce:   make(map[chatTopicKey]*debounceState),
 		runnerMgr:  runnerMgr,
+		sessionMgr: sessionMgr,
 		classifier: runner.NewClassifier("claude"),
 		cfg:        cfg,
 		botCfg:     botCfg,
@@ -87,9 +100,15 @@ func (d *Dispatcher) Handle(ctx context.Context, update tgbotapi.Update) {
 		return
 	}
 
+	// 提取 topic ID：论坛话题消息时使用 MessageThreadID，否则为 0
+	topicID := 0
+	if msg.IsTopicMessage {
+		topicID = msg.MessageThreadID
+	}
+
 	// 处理内置命令
 	if msg.IsCommand() {
-		d.handleCommand(ctx, msg)
+		d.handleCommand(ctx, msg, topicID)
 		return
 	}
 
@@ -98,48 +117,58 @@ func (d *Dispatcher) Handle(ctx context.Context, update tgbotapi.Update) {
 		return
 	}
 
-	d.enqueueWithDebounce(ctx, msg.Chat.ID, incomingMsg{
+	d.enqueueWithDebounce(ctx, chatTopicKey{msg.Chat.ID, topicID}, incomingMsg{
 		text:       text,
 		from:       msg.From.UserName,
 		chatID:     msg.Chat.ID,
+		topicID:    topicID,
 		receivedAt: time.Now(),
 	})
 }
 
 // handleCommand 处理 /start /help /clear /status 等内置命令。
-func (d *Dispatcher) handleCommand(ctx context.Context, msg *tgbotapi.Message) {
+func (d *Dispatcher) handleCommand(ctx context.Context, msg *tgbotapi.Message, topicID int) {
+	chatID := msg.Chat.ID
 	switch msg.Command() {
 	case "start", "help":
-		d.reply(msg.Chat.ID, "👋 goclaudeclaw 已就绪\n\n"+
+		d.reply(chatID, topicID, "👋 goclaudeclaw 已就绪\n\n"+
 			"发送任意消息即可与 Claude 对话。\n"+
 			"命令:\n"+
 			"  /clear — 清除当前会话\n"+
 			"  /status — 查看运行状态\n"+
 			"  /bg <任务> — 强制以后台模式运行")
 	case "clear":
-		// TODO: 调用 session.Manager.Clear()
-		d.reply(msg.Chat.ID, "✓ 会话已清除，下次对话将开启新会话。")
+		if err := d.sessionMgr.Clear(d.workspace, d.botCfg.Name, chatID, topicID); err != nil {
+			slog.Error("清除会话失败", "err", err, "chat_id", chatID, "topic_id", topicID)
+			d.reply(chatID, topicID, fmt.Sprintf("❌ 清除会话失败: %v", err))
+			return
+		}
+		d.reply(chatID, topicID, "✓ 会话已清除，下次对话将开启新会话。")
 	case "status":
-		d.reply(msg.Chat.ID, fmt.Sprintf(
-			"Bot: %s\nWorkspace: %s\nSecurity: %s",
-			d.botCfg.Name, d.workspace, d.cfg.Security.Level,
+		topicInfo := "无（普通聊天）"
+		if topicID > 0 {
+			topicInfo = fmt.Sprintf("Topic #%d", topicID)
+		}
+		d.reply(chatID, topicID, fmt.Sprintf(
+			"Bot: %s\nWorkspace: %s\nSecurity: %s\nTopic: %s",
+			d.botCfg.Name, d.workspace, d.cfg.Security.Level, topicInfo,
 		))
 	case "bg":
 		// 强制后台模式
 		prompt := msg.CommandArguments()
 		if prompt == "" {
-			d.reply(msg.Chat.ID, "用法: /bg <任务描述>")
+			d.reply(chatID, topicID, "用法: /bg <任务描述>")
 			return
 		}
-		d.dispatchJob(ctx, msg.Chat.ID, prompt, runner.ModeBackground)
+		d.dispatchJob(ctx, chatID, topicID, prompt, runner.ModeBackground)
 	default:
-		d.reply(msg.Chat.ID, "未知命令，发送 /help 查看帮助。")
+		d.reply(chatID, topicID, "未知命令，发送 /help 查看帮助。")
 	}
 }
 
 // enqueueWithDebounce 将消息加入防抖窗口。
-// 在 debounce_ms 内连续到达的消息会被合并为一条发给 claude。
-func (d *Dispatcher) enqueueWithDebounce(ctx context.Context, chatID int64, msg incomingMsg) {
+// 在 debounce_ms 内连续到达的同一 chat+topic 消息会被合并为一条发给 claude。
+func (d *Dispatcher) enqueueWithDebounce(ctx context.Context, key chatTopicKey, msg incomingMsg) {
 	debounceMs := d.botCfg.DebounceMs
 	if debounceMs <= 0 {
 		debounceMs = 1500 // 默认 1.5s
@@ -147,10 +176,10 @@ func (d *Dispatcher) enqueueWithDebounce(ctx context.Context, chatID int64, msg 
 	delay := time.Duration(debounceMs) * time.Millisecond
 
 	d.mu.Lock()
-	state, ok := d.debounce[chatID]
+	state, ok := d.debounce[key]
 	if !ok {
 		state = &debounceState{}
-		d.debounce[chatID] = state
+		d.debounce[key] = state
 	}
 	d.mu.Unlock()
 
@@ -173,10 +202,10 @@ func (d *Dispatcher) enqueueWithDebounce(ctx context.Context, chatID int64, msg 
 			return
 		}
 
-		// 合并消息
 		combined := combineMessages(msgs)
 		slog.Info("防抖窗口触发",
-			"chat_id", chatID,
+			"chat_id", key.chatID,
+			"topic_id", key.topicID,
 			"message_count", len(msgs),
 			"combined_len", len(combined),
 			"bot", d.botCfg.Name)
@@ -184,21 +213,24 @@ func (d *Dispatcher) enqueueWithDebounce(ctx context.Context, chatID int64, msg 
 		// 异步分类和分发，不阻塞防抖 goroutine
 		go func() {
 			mode := d.classifier.Classify(ctx, combined)
-			d.dispatchJob(ctx, chatID, combined, mode)
+			d.dispatchJob(ctx, key.chatID, key.topicID, combined, mode)
 		}()
 	})
 }
 
 // dispatchJob 将任务提交到 runner，并处理 Telegram 回复。
-func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, prompt string, mode runner.TaskMode) {
+func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int, prompt string, mode runner.TaskMode) {
 	// 后台任务：立即回复用户，异步执行
 	if mode == runner.ModeBackground {
-		d.reply(chatID, "⏳ 已在后台处理，完成后通知你。")
+		d.reply(chatID, topicID, "⏳ 已在后台处理，完成后通知你。")
 
 		resultCh := make(chan runner.Result, 1)
 		d.runnerMgr.Submit(runner.Job{
 			Ctx:       ctx,
 			Workspace: d.workspace,
+			BotName:   d.botCfg.Name,
+			ChatID:    chatID,
+			TopicID:   topicID,
 			Prompt:    prompt,
 			Mode:      mode,
 			ResultCh:  resultCh,
@@ -207,22 +239,24 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, prompt strin
 		go func() {
 			result := <-resultCh
 			if result.Err != nil {
-				d.reply(chatID, fmt.Sprintf("❌ 后台任务失败: %v", result.Err))
+				d.reply(chatID, topicID, fmt.Sprintf("❌ 后台任务失败: %v", result.Err))
 				return
 			}
-			// 长输出分段发送（Telegram 单条消息限 4096 字符）
-			d.sendOutput(chatID, result.Output)
+			d.sendOutput(chatID, topicID, result.Output)
 		}()
 		return
 	}
 
 	// 前台任务：等待结果后回复
-	d.reply(chatID, "⏳ 处理中...")
+	d.reply(chatID, topicID, "⏳ 处理中...")
 
 	resultCh := make(chan runner.Result, 1)
 	d.runnerMgr.Submit(runner.Job{
 		Ctx:       ctx,
 		Workspace: d.workspace,
+		BotName:   d.botCfg.Name,
+		ChatID:    chatID,
+		TopicID:   topicID,
 		Prompt:    prompt,
 		Mode:      mode,
 		ResultCh:  resultCh,
@@ -230,16 +264,16 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, prompt strin
 
 	result := <-resultCh
 	if result.Err != nil {
-		d.reply(chatID, fmt.Sprintf("❌ 执行失败: %v", result.Err))
+		d.reply(chatID, topicID, fmt.Sprintf("❌ 执行失败: %v", result.Err))
 		return
 	}
-	d.sendOutput(chatID, result.Output)
+	d.sendOutput(chatID, topicID, result.Output)
 }
 
 // sendOutput 处理超长输出，分段发送（每段最多 4000 字符）。
-func (d *Dispatcher) sendOutput(chatID int64, output string) {
+func (d *Dispatcher) sendOutput(chatID int64, topicID int, output string) {
 	if output == "" {
-		d.reply(chatID, "✓ 完成（无输出）")
+		d.reply(chatID, topicID, "✓ 完成（无输出）")
 		return
 	}
 
@@ -254,17 +288,22 @@ func (d *Dispatcher) sendOutput(chatID int64, output string) {
 		} else {
 			runes = nil
 		}
-		d.reply(chatID, string(chunk))
+		d.reply(chatID, topicID, string(chunk))
 	}
 }
 
-// reply 向指定 chat 发送文本消息，错误只记录日志不抛出。
-func (d *Dispatcher) reply(chatID int64, text string) {
+// reply 向指定 chat（可选 topic）发送文本消息，错误只记录日志不抛出。
+func (d *Dispatcher) reply(chatID int64, topicID int, text string) {
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = tgbotapi.ModeMarkdown
+	// 若在 topic 内，将回复发到同一 topic 线程
+	if topicID > 0 {
+		msg.MessageThreadID = topicID
+	}
 	if _, err := d.botAPI.Send(msg); err != nil {
 		slog.Error("发送 Telegram 消息失败",
 			"chat_id", chatID,
+			"topic_id", topicID,
 			"err", err,
 			"bot", d.botCfg.Name)
 	}
