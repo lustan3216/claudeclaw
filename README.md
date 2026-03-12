@@ -24,19 +24,19 @@ One binary. No Node, no Bun, no runtime to babysit.
 
 ## Install
 
-**One line:**
+**Via Claude Code plugin:**
+```sh
+claude plugin install lustan3216/goclaudeclaw
+```
+
+**One-line script:**
 ```sh
 curl -fsSL https://raw.githubusercontent.com/lustan3216/goclaudeclaw/main/install.sh | sh
 ```
 
-**Or with Go:**
+**With Go:**
 ```sh
 go install github.com/lustan3216/goclaudeclaw/cmd/goclaudeclaw@latest
-```
-
-**Or as Claude Code plugin (coming soon):**
-```sh
-claude plugin install lustan3216/goclaudeclaw
 ```
 
 ---
