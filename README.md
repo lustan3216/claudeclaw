@@ -1,184 +1,168 @@
 # goclaudeclaw ⚡
 
-A Go rewrite of [ClaudeClaw](https://github.com/lustan3216/claudeclaw) — a daemon that bridges Telegram bots to the Claude Code CLI, with shared memory, cron scheduling, and multi-bot support.
+**Claude Code on your phone. Tap a message, get work done.**
 
-## Why Go
+goclaudeclaw is a Go rewrite of [ClaudeClaw](https://github.com/lustan3216/claudeclaw) — a daemon that keeps Claude Code running 24/7 and lets you talk to it over Telegram. Ask it to write code, run reports, check your project status, or kick off a long task while you're away from your desk.
 
-The original TypeScript/Bun implementation worked well, but Go gives us:
-- Single static binary, zero runtime dependencies
-- Goroutine-per-bot model with clean lifecycle management
-- Built-in race detector catches concurrency bugs at dev time
-- Lower memory footprint for a long-running daemon
+One binary. No Node, no Bun, no runtime to babysit.
 
-## Features
+---
 
-- **Multi-bot** — run multiple Telegram bots simultaneously, each in its own goroutine, all sharing the same claude workspace and memory
-- **Auto subagent detection** — classifies incoming messages as `FOREGROUND` (interactive) or `BACKGROUND` (long-running, fire-and-forget) using a lightweight claude call
-- **Session persistence** — stores session IDs per workspace in `.goclaudeclaw_session` so `--resume` survives restarts
-- **Debounce** — configurable window to merge rapid-fire messages before sending to claude
-- **Heartbeat** — periodic prompts on a timer, with quiet windows (e.g. no pings at 3am) and timezone support
-- **Cron jobs** — standard cron expressions (with second precision) for scheduled prompts
-- **Config hot-reload** — YAML config reloads automatically via fsnotify, no restart needed
-- **claude-mem integration** — shared memory REST client (search + add) across all bots
-- **Security levels** — `locked / strict / moderate / unrestricted` maps to claude permission flags
+## Why goclaudeclaw over original ClaudeClaw?
 
-## Project Structure
+| | goclaudeclaw | claudeclaw (original) |
+|---|---|---|
+| Installation | `go install` — single binary, done | Node + Bun runtime required |
+| Multi-bot | Run multiple bots, each with different permissions | One bot |
+| Telegram Topics | Each topic = separate parallel conversation | Single thread |
+| Auto subagent | Long tasks run in background automatically | Manual `/bg` only |
+| Memory footprint | ~15MB idle | Heavier JS runtime |
+| Config reload | Hot-reload without restart | Restart required |
+| Crash recovery | Goroutine-per-bot, isolated failures | Process-level failure |
 
+---
+
+## Install
+
+```bash
+go install github.com/lustan3216/goclaudeclaw@latest
 ```
-goclaudeclaw/
-├── cmd/goclaudeclaw/main.go      # CLI entry (cobra), wires everything together
-├── internal/
-│   ├── bot/
-│   │   ├── telegram.go           # Long-polling goroutine per bot, reconnect on drop
-│   │   └── dispatcher.go         # Debounce, auth, classify, route to runner
-│   ├── runner/
-│   │   ├── runner.go             # Serial queue per workspace, executes claude CLI
-│   │   └── classifier.go         # One-shot claude call to classify BACKGROUND/FOREGROUND
-│   ├── session/
-│   │   └── session.go            # .goclaudeclaw_session file per workspace
-│   ├── memory/
-│   │   └── claudemem.go          # claude-mem REST client
-│   ├── scheduler/
-│   │   ├── heartbeat.go          # Ticker + quiet window logic
-│   │   └── cron.go               # robfig/cron wrapper with hot-reload support
-│   ├── config/
-│   │   └── config.go             # Viper + fsnotify config manager
-│   └── daemon/
-│       └── daemon.go             # PID file, signal handling, logger setup
-├── config.example.yaml
-├── go.mod
-└── Makefile
-```
+
+That's it. The binary lands in your `$GOPATH/bin`.
+
+---
 
 ## Quick Start
 
+**1. Create a config file**
+
+```yaml
+# config.yaml
+workspace: /path/to/your/project
+
+bots:
+  - name: "main"
+    token: "YOUR_TELEGRAM_BOT_TOKEN"
+    allowed_users: [123456789]   # your Telegram user ID — keep this private
+
+security:
+  level: moderate   # locked | strict | moderate | unrestricted
+```
+
+**2. Run it**
+
 ```bash
-# 1. Clone
-git clone https://github.com/lustan3216/goclaudeclaw
-cd goclaudeclaw
-
-# 2. Create config
-make config          # copies config.example.yaml → config.yaml
-$EDITOR config.yaml  # fill in your bot tokens and allowed_users
-
-# 3. Build
-make build           # outputs ./dist/goclaudeclaw
-
-# 4. Run
-./dist/goclaudeclaw --config config.yaml
-
-# Or install to $GOPATH/bin
-make install
 goclaudeclaw --config config.yaml
 ```
 
-## Configuration
+That's your Claude Code daemon, now reachable from anywhere.
 
-See [`config.example.yaml`](config.example.yaml) for the full reference. Key sections:
+---
+
+## Key Features
+
+### Telegram Topics → Parallel Conversations
+
+Create a Telegram group, enable Topics, and each topic becomes its own independent conversation with Claude. Run a code review in one thread while a deploy task runs in another — no waiting in line.
+
+### Multi-Bot Support
+
+Run multiple bots from a single config. Give different people (or different projects) their own bot with separate permissions and workspaces. All bots share the same claude-mem memory.
+
+### Auto Subagent Detection
+
+When you send a message, goclaudeclaw quickly figures out if it's a quick question (answer in the chat) or a long task (fire it in the background). You don't have to think about it. Long tasks reply immediately with "on it" and ping you when done.
+
+### Shared Memory via claude-mem
+
+All bots pull from the same memory store. Things Claude learns in one conversation are available in others. Your project context, preferences, and past decisions persist across restarts.
+
+### Heartbeat
+
+Optional periodic check-ins — Claude pings you on a timer to surface anything worth your attention. Configure quiet windows so it doesn't bother you at 3am.
+
+### Cron Jobs
+
+Schedule prompts with standard cron syntax. Daily reports, weekly summaries, whatever you want on a clock.
+
+### Hot Config Reload
+
+Edit `config.yaml` and changes apply immediately — no restart, no dropped connections.
+
+---
+
+## Config Reference
 
 ```yaml
-workspace: /path/to/project   # Where claude runs
+workspace: /path/to/project
 
 bots:
   - name: "main"
     token: "BOT_TOKEN"
-    allowed_users: [123456789]  # REQUIRED — prevents public access
-    debounce_ms: 1500
+    allowed_users: [123456789]
+    debounce_ms: 1500            # merge rapid messages before sending
 
 security:
-  level: moderate               # locked | strict | moderate | unrestricted
+  level: moderate                # moderate = most ops auto-approved
 
 heartbeat:
   enabled: true
-  interval_minutes: 15
+  interval_minutes: 30
   quiet_windows:
     - start: "23:00"
       end: "08:00"
   timezone: "Asia/Shanghai"
+
+memory:
+  enabled: true
+  url: "http://localhost:3001"   # claude-mem server
+
+crons:
+  - name: "daily-standup"
+    schedule: "0 9 * * 1-5"
+    prompt: "What's on today's agenda?"
 ```
 
 **Security levels:**
 
-| Level | Behavior |
-|-------|----------|
-| `locked` | Read-only — system prompt constrains claude (TODO) |
-| `strict` | Confirm every tool call (claude default) |
-| `moderate` | Most ops auto-approved (default) |
+| Level | What it means |
+|-------|---------------|
+| `locked` | Read-only, system prompt constrained |
+| `strict` | Confirm every tool call (Claude default) |
+| `moderate` | Most operations auto-approved |
 | `unrestricted` | `--dangerously-skip-permissions` |
+
+---
 
 ## Bot Commands
 
-| Command | Description |
+| Command | What it does |
 |---------|-------------|
 | `/start`, `/help` | Show help |
-| `/clear` | Clear current session (start fresh) |
-| `/status` | Show bot name, workspace, security level |
-| `/bg <task>` | Force background mode for a task |
+| `/clear` | Start a fresh session |
+| `/status` | Show workspace, security level, session info |
+| `/bg <task>` | Force a task to run in background mode |
 
-## How Message Classification Works
+---
 
-When a message arrives after the debounce window:
+## FAQ
 
-1. A separate one-shot `claude -p "<classification prompt>"` call is made
-2. Claude replies `BACKGROUND` or `FOREGROUND`
-3. **FOREGROUND** → run normally, stream output back to Telegram
-4. **BACKGROUND** → reply immediately with "processing in background", run in a separate goroutine, notify when done
+**Does this break Anthropic ToS?**
+No. It wraps Claude Code directly — same as running `claude` from your terminal, just with a Telegram UI on top.
 
-The classifier times out after 10 seconds and defaults to FOREGROUND on any error.
+**Does it work on a VPS?**
+Yes, that's the main use case. Install it on any Linux server, point it at your project, and your Telegram becomes a remote terminal with Claude inside.
 
-## Session Management
+**Can multiple people use the same bot?**
+Set multiple user IDs in `allowed_users`. Each user gets their own conversation context.
 
-Each workspace has a `.goclaudeclaw_session` file containing the Claude session ID. This enables `--resume <id>` on every call so conversation context persists across:
-- Bot restarts
-- Multiple bots (they share the same session file)
-- Config reloads
+**What happens if Claude is mid-task and I restart?**
+Session IDs are persisted to disk. `--resume` is passed automatically on the next run so context survives restarts.
 
-Clear a session with `/clear` or by deleting the file.
-
-## Makefile Targets
-
-```
-build         Compile for local platform → ./dist/
-build-linux   Cross-compile for Linux amd64
-build-all     All platforms (linux, darwin arm64/amd64)
-install       Install to $GOPATH/bin
-run           go run with --debug
-test          go test -race ./...
-lint          golangci-lint run
-fmt           gofmt -w .
-tidy          go mod tidy
-clean         Remove ./dist/ and build cache
-config        Create config.yaml from example (non-destructive)
-```
-
-## Dependencies
-
-| Package | Purpose |
-|---------|---------|
-| `github.com/spf13/cobra` | CLI commands and flags |
-| `github.com/spf13/viper` | Config loading + hot-reload |
-| `github.com/go-telegram-bot-api/telegram-bot-api/v5` | Telegram long-polling |
-| `github.com/robfig/cron/v3` | Cron scheduling with second precision |
-| `github.com/fsnotify/fsnotify` | File system watching (used by viper) |
-
-## Development
-
-```bash
-# Run with race detector
-go run -race ./cmd/goclaudeclaw --config config.yaml --debug
-
-# Validate config without starting
-goclaudeclaw validate --config config.yaml
-
-# Run tests
-make test
-
-# Check for issues
-make vet lint
-```
+---
 
 ## Related
 
 - [claudeclaw](https://github.com/lustan3216/claudeclaw) — original TypeScript/Bun implementation
-- [claude-mem](https://github.com/anthropics/claude-mem) — shared memory MCP server
-- [Claude Code CLI](https://docs.anthropic.com/claude-code) — the underlying AI engine
+- [claude-mem](https://github.com/lustan3216/claude-mem) — shared memory server (MCP-compatible)
+- [Claude Code](https://docs.anthropic.com/claude-code) — the engine underneath
