@@ -106,6 +106,35 @@ func (d *Dispatcher) Handle(ctx context.Context, update tgbotapi.Update) {
 		topicID = msg.MessageThreadID
 	}
 
+	// 处理论坛话题生命周期事件（服务消息，无文本内容）
+	if msg.ForumTopicCreated != nil {
+		topicName := msg.ForumTopicCreated.Name
+		threadID := msg.MessageThreadID
+		slog.Info("新 topic 已建立",
+			"topic_name", topicName,
+			"thread_id", threadID,
+			"chat_id", msg.Chat.ID)
+		// session 懒创建，首条真实消息到来时自动建立
+		d.reply(msg.Chat.ID, threadID, "✓ 已就緒 — 這個 topic 有獨立的對話 session")
+		return
+	}
+
+	if msg.ForumTopicClosed != nil {
+		slog.Info("topic 已关闭",
+			"thread_id", msg.MessageThreadID,
+			"chat_id", msg.Chat.ID)
+		// session 保留在存储中，无需其他操作
+		return
+	}
+
+	if msg.ForumTopicReopened != nil {
+		slog.Info("topic 已重新开启",
+			"thread_id", msg.MessageThreadID,
+			"chat_id", msg.Chat.ID)
+		d.reply(msg.Chat.ID, msg.MessageThreadID, "✓ Topic 已重新開啟，繼續原有 session")
+		return
+	}
+
 	// 处理内置命令
 	if msg.IsCommand() {
 		d.handleCommand(ctx, msg, topicID)
