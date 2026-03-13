@@ -548,7 +548,7 @@ func (d *Dispatcher) buildUsageReport() string {
 			"缓存命中    %s\n"+
 			"消息数      %d  (%d sessions)\n"+
 			"```\n\n"+
-			"额度余额请查看: console\\.anthropic\\.com",
+			"额度余额请查看: console.anthropic.com",
 		today,
 		fmtK(todayStats.inputTokens), fmtK(todayStats.outputTokens),
 		fmtK(todayStats.cacheCreate), fmtK(todayStats.cacheRead),
