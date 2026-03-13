@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/lustan3216/goclaudeclaw/internal/config"
+	"github.com/lustan3216/goclaudeclaw/internal/memory"
 	"github.com/lustan3216/goclaudeclaw/internal/session"
 )
 
@@ -132,6 +133,19 @@ func (m *Manager) runQueue(key queueKey, q <-chan Job) {
 func (m *Manager) execute(job Job) Result {
 	sessionID := m.sessions.Get(job.Workspace, job.BotName, job.ChatID, job.TopicID)
 	isNewSession := sessionID == ""
+
+	// 新会话时注入本地记忆（省 token：续会话已有 context）
+	prompt := job.Prompt
+	if isNewSession {
+		localMem := memory.NewLocalMemory(job.Workspace)
+		if memContent, err := localMem.Load(); err != nil {
+			slog.Warn("读取本地记忆失败，跳过注入", "err", err)
+		} else if memContent != "" {
+			prompt = memory.InjectPrefix(memContent, prompt)
+			slog.Debug("已注入本地记忆", "memory_len", len(memContent))
+		}
+	}
+	job.Prompt = prompt
 
 	args := m.buildArgs(job, sessionID)
 
