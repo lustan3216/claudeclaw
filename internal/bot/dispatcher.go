@@ -63,6 +63,7 @@ type Dispatcher struct {
 	sessionMgr *session.Manager
 	classifier *runner.Classifier
 	cfg        *config.Config
+	cfgMgr     *config.Manager
 	botCfg     config.BotConfig
 	botAPI     *telego.Bot
 	workspace  string
@@ -73,6 +74,7 @@ func NewDispatcher(
 	botAPI *telego.Bot,
 	botCfg config.BotConfig,
 	cfg *config.Config,
+	cfgMgr *config.Manager,
 	runnerMgr *runner.Manager,
 	sessionMgr *session.Manager,
 	workspace string,
@@ -81,12 +83,13 @@ func NewDispatcher(
 		debounce:         make(map[chatTopicKey]*debounceState),
 		completionCounts: make(map[chatTopicKey]int),
 		runnerMgr:        runnerMgr,
-		sessionMgr: sessionMgr,
-		classifier: runner.NewClassifier("claude"),
-		cfg:        cfg,
-		botCfg:     botCfg,
-		botAPI:     botAPI,
-		workspace:  workspace,
+		sessionMgr:       sessionMgr,
+		classifier:       runner.NewClassifier("claude"),
+		cfg:              cfg,
+		cfgMgr:           cfgMgr,
+		botCfg:           botCfg,
+		botAPI:           botAPI,
+		workspace:        workspace,
 	}
 }
 
@@ -293,7 +296,7 @@ func parseCommand(msg *telego.Message) (cmd string, args string, ok bool) {
 	return "", "", false
 }
 
-// handleCommand 处理 /start /help /clear /status /bg 等内置命令。
+// handleCommand 处理 /start /help /clear /status /bg /set /unset /config 等内置命令。
 func (d *Dispatcher) handleCommand(ctx context.Context, msg *telego.Message, topicID int, cmd string, args string) {
 	chatID := msg.Chat.ID
 	switch cmd {
@@ -301,9 +304,77 @@ func (d *Dispatcher) handleCommand(ctx context.Context, msg *telego.Message, top
 		d.reply(chatID, topicID, "👋 goclaudeclaw 已就绪\n\n"+
 			"发送任意消息即可与 Claude 对话。\n"+
 			"命令:\n"+
-			"  /clear — 清除当前会话\n"+
+			"  /clear — 清除当前会话（重载 MCP）\n"+
 			"  /status — 查看运行状态\n"+
-			"  /bg <任务> — 强制以后台模式运行")
+			"  /config — 查看当前设置\n"+
+			"  /set <key> <value> — 更新配置\n"+
+			"  /unset <key> — 清除配置值\n"+
+			"  /bg <任务> — 强制以后台模式运行\n\n"+
+			"可设置的 key:\n"+
+			"  github_token, notion_token, brave_key, browser")
+	case "config":
+		if d.cfgMgr == nil {
+			d.reply(chatID, topicID, "❌ 配置管理器未初始化")
+			return
+		}
+		cfg := d.cfgMgr.Get()
+		mask := func(s string) string {
+			if s == "" {
+				return "（未设置）"
+			}
+			if len(s) <= 8 {
+				return "***"
+			}
+			return s[:4] + "..." + s[len(s)-4:]
+		}
+		browserStatus := "false"
+		if cfg.MCPs.Browser.Enabled {
+			browserStatus = "true"
+		}
+		d.reply(chatID, topicID, fmt.Sprintf(
+			"当前 MCP 设置:\n"+
+				"  github_token = %s\n"+
+				"  notion_token = %s\n"+
+				"  brave_key    = %s\n"+
+				"  browser      = %s",
+			mask(cfg.MCPs.GitHub.Token),
+			mask(cfg.MCPs.Notion.Token),
+			mask(cfg.MCPs.Brave.APIKey),
+			browserStatus,
+		))
+	case "set":
+		if d.cfgMgr == nil {
+			d.reply(chatID, topicID, "❌ 配置管理器未初始化")
+			return
+		}
+		parts := strings.SplitN(args, " ", 2)
+		if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+			d.reply(chatID, topicID, "用法: /set <key> <value>\n\n可设置: github_token, notion_token, brave_key, browser")
+			return
+		}
+		key, value := parts[0], parts[1]
+		if err := d.cfgMgr.Set(key, value); err != nil {
+			d.reply(chatID, topicID, fmt.Sprintf("❌ 设置失败: %v", err))
+			return
+		}
+		// 清除 session，让下一条消息重建（重载 MCP）
+		_ = d.sessionMgr.Clear(d.workspace, d.botCfg.Name, chatID, topicID)
+		d.reply(chatID, topicID, fmt.Sprintf("✓ %s 已更新，session 已重置（下次对话将重载 MCP）", key))
+	case "unset":
+		if d.cfgMgr == nil {
+			d.reply(chatID, topicID, "❌ 配置管理器未初始化")
+			return
+		}
+		if args == "" {
+			d.reply(chatID, topicID, "用法: /unset <key>\n\n可设置: github_token, notion_token, brave_key, browser")
+			return
+		}
+		if err := d.cfgMgr.Set(args, ""); err != nil {
+			d.reply(chatID, topicID, fmt.Sprintf("❌ 清除失败: %v", err))
+			return
+		}
+		_ = d.sessionMgr.Clear(d.workspace, d.botCfg.Name, chatID, topicID)
+		d.reply(chatID, topicID, fmt.Sprintf("✓ %s 已清除，session 已重置", args))
 	case "clear":
 		if err := d.sessionMgr.Clear(d.workspace, d.botCfg.Name, chatID, topicID); err != nil {
 			slog.Error("清除会话失败", "err", err, "chat_id", chatID, "topic_id", topicID)

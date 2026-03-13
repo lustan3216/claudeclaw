@@ -26,6 +26,7 @@ type Bot struct {
 func NewBot(
 	botCfg config.BotConfig,
 	globalCfg *config.Config,
+	cfgMgr *config.Manager,
 	runnerMgr *runner.Manager,
 	sessionMgr *session.Manager,
 	workspace string,
@@ -50,7 +51,7 @@ func NewBot(
 		"bot_name", botCfg.Name,
 		"username", self.Username)
 
-	dispatcher := NewDispatcher(api, botCfg, globalCfg, runnerMgr, sessionMgr, workspace)
+	dispatcher := NewDispatcher(api, botCfg, globalCfg, cfgMgr, runnerMgr, sessionMgr, workspace)
 
 	return &Bot{
 		api:        api,
@@ -114,12 +115,13 @@ type Manager struct {
 // NewManager 根据配置初始化所有 bot 实例。
 func NewManager(
 	cfg *config.Config,
+	cfgMgr *config.Manager,
 	runnerMgr *runner.Manager,
 	sessionMgr *session.Manager,
 ) (*Manager, error) {
 	var bots []*Bot
 	for _, botCfg := range cfg.Bots {
-		b, err := NewBot(botCfg, cfg, runnerMgr, sessionMgr, cfg.Workspace)
+		b, err := NewBot(botCfg, cfg, cfgMgr, runnerMgr, sessionMgr, cfg.Workspace)
 		if err != nil {
 			return nil, err
 		}

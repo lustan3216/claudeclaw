@@ -183,6 +183,45 @@ func (m *Manager) OnChange(fn func(newCfg *Config)) {
 	m.onChange = append(m.onChange, fn)
 }
 
+// keyAliases 将用户友好的短名称映射到 viper 配置路径。
+// 供 Telegram /set /unset /config 命令使用。
+var keyAliases = map[string]string{
+	"github_token": "mcps.github.token",
+	"notion_token": "mcps.notion.token",
+	"brave_key":    "mcps.brave.api_key",
+	"browser":      "mcps.browser.enabled",
+}
+
+// Set 通过 viper 路径或用户友好别名设置配置值，写入文件并触发热重载回调。
+func (m *Manager) Set(keyOrAlias, value string) error {
+	viperKey := keyOrAlias
+	if mapped, ok := keyAliases[keyOrAlias]; ok {
+		viperKey = mapped
+	}
+	m.viper.Set(viperKey, value)
+	if err := m.viper.WriteConfig(); err != nil {
+		return fmt.Errorf("写入配置文件失败: %w", err)
+	}
+	newCfg, err := decode(m.viper)
+	if err != nil {
+		return fmt.Errorf("配置解析失败: %w", err)
+	}
+	m.mu.Lock()
+	m.current = newCfg
+	handlers := make([]func(*Config), len(m.onChange))
+	copy(handlers, m.onChange)
+	m.mu.Unlock()
+	for _, fn := range handlers {
+		fn(newCfg)
+	}
+	return nil
+}
+
+// KnownAliases 返回所有支持的用户友好别名列表。
+func KnownAliases() map[string]string {
+	return keyAliases
+}
+
 // setDefaults 设置 viper 默认值，避免配置文件缺字段时 panic。
 func setDefaults(v *viper.Viper) {
 	v.SetDefault("workspace", ".")

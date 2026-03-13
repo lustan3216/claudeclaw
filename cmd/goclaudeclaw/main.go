@@ -120,7 +120,7 @@ func run(flags *cliFlags) error {
 	runnerMgr := runner.NewManager(cfg, sessionMgr, flags.claudePath)
 
 	// ── 8. Telegram Bot Manager ─────────────────────────────────────
-	botMgr, err := bot.NewManager(cfg, runnerMgr, sessionMgr)
+	botMgr, err := bot.NewManager(cfg, cfgManager, runnerMgr, sessionMgr)
 	if err != nil {
 		return fmt.Errorf("初始化 bot 失败: %w", err)
 	}
