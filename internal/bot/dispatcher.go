@@ -387,6 +387,9 @@ func (d *Dispatcher) enqueueWithDebounce(ctx context.Context, key chatTopicKey, 
 // dispatchJob 将任务提交到 runner，并处理 Telegram 回复。
 // replyToID 为触发本次任务的最后一条消息 ID，回复时 quote 该消息。
 func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int, replyToID int, prompt string, mode runner.TaskMode) {
+	// 收到訊息先打 👀
+	d.react(chatID, replyToID, "👀")
+
 	// 后台任务：立即回复用户，异步执行
 	if mode == runner.ModeBackground {
 		d.replyTo(chatID, topicID, replyToID, "⏳ 已在后台处理，完成后通知你。")
@@ -409,6 +412,7 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 				d.replyTo(chatID, topicID, replyToID, fmt.Sprintf("❌ 后台任务失败: %v", result.Err))
 				return
 			}
+			d.react(chatID, replyToID, "✅")
 			d.sendOutputTo(chatID, topicID, replyToID, result.Output)
 		}()
 		return
@@ -454,6 +458,7 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 		d.replyTo(chatID, topicID, replyToID, fmt.Sprintf("❌ 执行失败: %v", result.Err))
 		return
 	}
+	d.react(chatID, replyToID, "✅")
 	d.sendOutputTo(chatID, topicID, replyToID, result.Output)
 }
 
@@ -511,6 +516,15 @@ func (d *Dispatcher) replyTo(chatID int64, topicID int, replyToID int, text stri
 // reply 向指定 chat（可选 topic）发送文本消息，不 quote 任何消息。
 func (d *Dispatcher) reply(chatID int64, topicID int, text string) {
 	d.replyTo(chatID, topicID, 0, text)
+}
+
+// react 给指定消息打表情 reaction，出错只记日志不影响主流程。
+func (d *Dispatcher) react(chatID int64, messageID int, emoji string) {
+	_ = d.botAPI.SetMessageReaction(&telego.SetMessageReactionParams{
+		ChatID:    telego.ChatID{ID: chatID},
+		MessageID: messageID,
+		Reaction:  []telego.ReactionType{&telego.ReactionTypeEmoji{Type: "emoji", Emoji: emoji}},
+	})
 }
 
 // isAllowed 检查用户是否在白名单中。
