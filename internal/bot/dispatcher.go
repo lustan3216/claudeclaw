@@ -64,6 +64,9 @@ type Dispatcher struct {
 	autoUpdateMu      sync.Mutex
 	autoUpdateRunning bool // 防止同时启动多个后台更新
 
+	cancelMu  sync.Mutex
+	cancelFns map[chatTopicKey]context.CancelFunc // 每个 chat+topic 当前运行 job 的 cancel 函数
+
 	runnerMgr  *runner.Manager
 	sessionMgr *session.Manager
 	classifier *runner.Classifier
@@ -87,6 +90,7 @@ func NewDispatcher(
 	return &Dispatcher{
 		debounce:         make(map[chatTopicKey]*debounceState),
 		completionCounts: make(map[chatTopicKey]int),
+		cancelFns:        make(map[chatTopicKey]context.CancelFunc),
 		runnerMgr:        runnerMgr,
 		sessionMgr:       sessionMgr,
 		classifier:       runner.NewClassifier("claude"),
@@ -316,6 +320,7 @@ func (d *Dispatcher) handleCommand(ctx context.Context, msg *telego.Message, top
 				"*💬 對話*\n"+
 				"直接发消息即可与 Claude 对话\n"+
 				"`/clear`          清除 session，重载 MCP\n"+
+				"`/stop`           取消当前正在执行的任务\n"+
 				"`/bg <任务>`      强制后台模式，长任务不堵对话\n"+
 				"`/status`         查看运行状态\n"+
 				"`/usage`          今日 token 用量统计\n\n"+
@@ -435,6 +440,20 @@ func (d *Dispatcher) handleCommand(ctx context.Context, msg *telego.Message, top
 			return
 		}
 		d.dispatchJob(ctx, chatID, topicID, msg.MessageID, args, runner.ModeBackground)
+	case "stop":
+		key := chatTopicKey{chatID, topicID}
+		d.cancelMu.Lock()
+		fn, ok := d.cancelFns[key]
+		if ok {
+			delete(d.cancelFns, key)
+		}
+		d.cancelMu.Unlock()
+		if ok {
+			fn()
+			d.reply(chatID, topicID, "🛑 已发送取消信号")
+		} else {
+			d.reply(chatID, topicID, "没有正在运行的任务")
+		}
 	case "usage":
 		d.reply(chatID, topicID, d.buildUsageReport())
 	default:
@@ -703,13 +722,30 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 	// 收到訊息先打 👀
 	d.react(chatID, replyToID, "👀")
 
+	// 为当前 job 创建独立 cancel，注册到 cancelFns 以支持 /stop
+	jobCtx, jobCancel := context.WithCancel(ctx)
+	key := chatTopicKey{chatID, topicID}
+	d.cancelMu.Lock()
+	if old, ok := d.cancelFns[key]; ok {
+		old() // 取消可能残留的旧 job
+	}
+	d.cancelFns[key] = jobCancel
+	d.cancelMu.Unlock()
+
+	cleanup := func() {
+		d.cancelMu.Lock()
+		delete(d.cancelFns, key)
+		d.cancelMu.Unlock()
+		jobCancel()
+	}
+
 	// 后台任务：立即回复用户，异步执行
 	if mode == runner.ModeBackground {
 		d.replyTo(chatID, topicID, replyToID, "⏳ 已在后台处理，完成后通知你。")
 
 		resultCh := make(chan runner.Result, 1)
 		d.runnerMgr.Submit(runner.Job{
-			Ctx:       ctx,
+			Ctx:       jobCtx,
 			Workspace: d.workspace,
 			BotName:   d.botCfg.Name,
 			ChatID:    chatID,
@@ -720,15 +756,20 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 		})
 
 		go func() {
+			defer cleanup()
 			result := <-resultCh
 			if result.Err != nil {
+				if jobCtx.Err() != nil {
+					d.replyTo(chatID, topicID, replyToID, "🛑 已取消")
+					return
+				}
 				d.replyTo(chatID, topicID, replyToID, fmt.Sprintf("❌ 后台任务失败: %v", result.Err))
 				return
 			}
 			d.react(chatID, replyToID, "✅")
 			d.sendOutputTo(chatID, topicID, replyToID, result.Output)
-			d.maybeUpdateMemory(ctx, chatID, topicID)
-			d.maybeSummarizeSession(ctx, chatID, topicID)
+			d.maybeUpdateMemory(jobCtx, chatID, topicID)
+			d.maybeSummarizeSession(jobCtx, chatID, topicID)
 		}()
 		return
 	}
@@ -767,6 +808,8 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 			select {
 			case <-typingDone:
 				return
+			case <-jobCtx.Done():
+				return
 			case <-ticker.C:
 				params := &telego.SendChatActionParams{
 					ChatID: telego.ChatID{ID: chatID},
@@ -784,7 +827,12 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 
 	result := <-resultCh
 	close(typingDone)
+	cleanup()
 
+	if jobCtx.Err() != nil {
+		d.replyTo(chatID, topicID, replyToID, "🛑 已取消")
+		return
+	}
 	if result.Err != nil {
 		d.replyTo(chatID, topicID, replyToID, fmt.Sprintf("❌ 执行失败: %v", result.Err))
 		return
