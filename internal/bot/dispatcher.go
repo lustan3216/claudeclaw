@@ -19,8 +19,6 @@ import (
 	"sync"
 	"time"
 
-	tu "github.com/mymmrac/telego/telegoutil"
-
 	"github.com/mymmrac/telego"
 
 	"github.com/lustan3216/goclaudeclaw/internal/config"
@@ -418,7 +416,18 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 		return
 	}
 
-	// 前台任务：显示 typing 指示器直到结果返回
+	// 前台任务：发送「🤔 思考中...」占位，完成后直接 edit 成结果
+	thinkingMsg, err := d.botAPI.SendMessage(&telego.SendMessageParams{
+		ChatID:          telego.ChatID{ID: chatID},
+		Text:            "🤔 思考中...",
+		MessageThreadID: topicID,
+		ReplyParameters: &telego.ReplyParameters{MessageID: replyToID},
+	})
+	thinkingMsgID := 0
+	if err == nil && thinkingMsg != nil {
+		thinkingMsgID = thinkingMsg.MessageID
+	}
+
 	resultCh := make(chan runner.Result, 1)
 	d.runnerMgr.Submit(runner.Job{
 		Ctx:       ctx,
@@ -431,35 +440,13 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 		ResultCh:  resultCh,
 	})
 
-	// 每 4 秒刷新一次 typing 状态（Telegram typing 提示 5 秒自动消失）
-	typingDone := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(4 * time.Second)
-		defer ticker.Stop()
-		chatIDObj := tu.ID(chatID)
-		params := &telego.SendChatActionParams{ChatID: chatIDObj, Action: telego.ChatActionTyping}
-		if topicID > 0 {
-			params.MessageThreadID = topicID
-		}
-		_ = d.botAPI.SendChatAction(params)
-		for {
-			select {
-			case <-ticker.C:
-				_ = d.botAPI.SendChatAction(params)
-			case <-typingDone:
-				return
-			}
-		}
-	}()
-
 	result := <-resultCh
-	close(typingDone)
 	if result.Err != nil {
-		d.replyTo(chatID, topicID, replyToID, fmt.Sprintf("❌ 执行失败: %v", result.Err))
+		d.editOrReply(chatID, topicID, thinkingMsgID, replyToID, fmt.Sprintf("❌ 执行失败: %v", result.Err))
 		return
 	}
 	d.react(chatID, replyToID, "✅")
-	d.sendOutputTo(chatID, topicID, replyToID, result.Output)
+	d.sendOutputWithThinking(chatID, topicID, thinkingMsgID, replyToID, result.Output)
 }
 
 // sendOutputTo 处理超长输出，首段 quote 触发消息，后续段直接发送。
@@ -483,6 +470,61 @@ func (d *Dispatcher) sendOutputTo(chatID int64, topicID int, replyToID int, outp
 		}
 		if first {
 			d.replyTo(chatID, topicID, replyToID, string(chunk))
+			first = false
+		} else {
+			d.reply(chatID, topicID, string(chunk))
+		}
+	}
+}
+
+// editOrReply 尝试编辑 thinkingMsgID；若无效或编辑失败则退回 replyTo。
+func (d *Dispatcher) editOrReply(chatID int64, topicID int, thinkingMsgID int, replyToID int, text string) {
+	if thinkingMsgID > 0 {
+		_, err := d.botAPI.EditMessageText(&telego.EditMessageTextParams{
+			ChatID:    telego.ChatID{ID: chatID},
+			MessageID: thinkingMsgID,
+			Text:      text,
+			ParseMode: telego.ModeMarkdown,
+		})
+		if err == nil {
+			return
+		}
+		// Markdown 解析失败时降级为纯文本重试
+		_, err = d.botAPI.EditMessageText(&telego.EditMessageTextParams{
+			ChatID:    telego.ChatID{ID: chatID},
+			MessageID: thinkingMsgID,
+			Text:      text,
+		})
+		if err == nil {
+			return
+		}
+		slog.Warn("编辑消息失败，退回 replyTo", "err", err, "chat_id", chatID)
+	}
+	d.replyTo(chatID, topicID, replyToID, text)
+}
+
+// sendOutputWithThinking 将结果写入思考占位消息：
+// 第一段 edit 进 thinkingMsgID，超长部分作为新消息继续发送。
+func (d *Dispatcher) sendOutputWithThinking(chatID int64, topicID int, thinkingMsgID int, replyToID int, output string) {
+	if output == "" {
+		d.editOrReply(chatID, topicID, thinkingMsgID, replyToID, "✓ 完成（无输出）")
+		return
+	}
+
+	const maxLen = 4000
+	runes := []rune(output)
+	first := true
+
+	for len(runes) > 0 {
+		chunk := runes
+		if len(chunk) > maxLen {
+			chunk = runes[:maxLen]
+			runes = runes[maxLen:]
+		} else {
+			runes = nil
+		}
+		if first {
+			d.editOrReply(chatID, topicID, thinkingMsgID, replyToID, string(chunk))
 			first = false
 		} else {
 			d.reply(chatID, topicID, string(chunk))
