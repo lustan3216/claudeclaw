@@ -101,14 +101,15 @@ type CronJob struct {
 
 // Config 全局配置结构体。
 type Config struct {
-	Workspace string          `mapstructure:"workspace"`
-	Bots      []BotConfig     `mapstructure:"bots"`
-	Memory    MemoryConfig    `mapstructure:"memory"`
-	Heartbeat HeartbeatConfig `mapstructure:"heartbeat"`
-	Security  SecurityConfig  `mapstructure:"security"`
-	Web       WebConfig       `mapstructure:"web"`
-	CronJobs  []CronJob       `mapstructure:"cron_jobs"`
-	MCPs      MCPsConfig      `mapstructure:"mcps"`
+	Workspace  string          `mapstructure:"workspace"`
+	AutoUpdate bool            `mapstructure:"auto_update"` // true 表示 run.sh watchdog 每次重啟前自動 git pull + rebuild
+	Bots       []BotConfig     `mapstructure:"bots"`
+	Memory     MemoryConfig    `mapstructure:"memory"`
+	Heartbeat  HeartbeatConfig `mapstructure:"heartbeat"`
+	Security   SecurityConfig  `mapstructure:"security"`
+	Web        WebConfig       `mapstructure:"web"`
+	CronJobs   []CronJob       `mapstructure:"cron_jobs"`
+	MCPs       MCPsConfig      `mapstructure:"mcps"`
 }
 
 // Manager 持有当前配置并支持热重载。
@@ -190,6 +191,7 @@ var keyAliases = map[string]string{
 	"notion_token": "mcps.notion.token",
 	"brave_key":    "mcps.brave.api_key",
 	"browser":      "mcps.browser.enabled",
+	"auto_update":  "auto_update",
 }
 
 // Set 通过 viper 路径或用户友好别名设置配置值，写入文件并触发热重载回调。
@@ -225,6 +227,7 @@ func KnownAliases() map[string]string {
 // setDefaults 设置 viper 默认值，避免配置文件缺字段时 panic。
 func setDefaults(v *viper.Viper) {
 	v.SetDefault("workspace", ".")
+	v.SetDefault("auto_update", true)
 	v.SetDefault("heartbeat.enabled", false)
 	v.SetDefault("heartbeat.interval_minutes", 15)
 	v.SetDefault("heartbeat.timezone", "UTC")
