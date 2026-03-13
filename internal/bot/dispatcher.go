@@ -425,7 +425,9 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 	if topicID > 0 {
 		firstTypingParams.MessageThreadID = topicID
 	}
-	_ = d.botAPI.SendChatAction(firstTypingParams)
+	if err := d.botAPI.SendChatAction(firstTypingParams); err != nil {
+		slog.Warn("SendChatAction 失败", "err", err, "chat_id", chatID, "topic_id", topicID)
+	}
 
 	resultCh := make(chan runner.Result, 1)
 	d.runnerMgr.Submit(runner.Job{
@@ -456,7 +458,9 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 				if topicID > 0 {
 					params.MessageThreadID = topicID
 				}
-				_ = d.botAPI.SendChatAction(params)
+				if err := d.botAPI.SendChatAction(params); err != nil {
+					slog.Warn("续 typing 失败", "err", err, "chat_id", chatID, "topic_id", topicID)
+				}
 			}
 		}
 	}()
