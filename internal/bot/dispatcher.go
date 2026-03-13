@@ -416,17 +416,16 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 		return
 	}
 
-	// 前台任务：发送「🤔 思考中...」占位，完成后直接 edit 成结果
-	thinkingMsg, err := d.botAPI.SendMessage(&telego.SendMessageParams{
-		ChatID:          telego.ChatID{ID: chatID},
-		Text:            "🤔 思考中...",
-		MessageThreadID: topicID,
-		ReplyParameters: &telego.ReplyParameters{MessageID: replyToID},
-	})
-	thinkingMsgID := 0
-	if err == nil && thinkingMsg != nil {
-		thinkingMsgID = thinkingMsg.MessageID
+	// 前台任务：持续发送 typing 动作直到完成，再回复结果
+	// 立即发送第一次 typing，让用户马上看到反馈
+	firstTypingParams := &telego.SendChatActionParams{
+		ChatID: telego.ChatID{ID: chatID},
+		Action: telego.ChatActionTyping,
 	}
+	if topicID > 0 {
+		firstTypingParams.MessageThreadID = topicID
+	}
+	_ = d.botAPI.SendChatAction(firstTypingParams)
 
 	resultCh := make(chan runner.Result, 1)
 	d.runnerMgr.Submit(runner.Job{
@@ -440,13 +439,37 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 		ResultCh:  resultCh,
 	})
 
+	// 每 4s 续一次 typing，直到结果就绪
+	typingDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(4 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-typingDone:
+				return
+			case <-ticker.C:
+				params := &telego.SendChatActionParams{
+					ChatID: telego.ChatID{ID: chatID},
+					Action: telego.ChatActionTyping,
+				}
+				if topicID > 0 {
+					params.MessageThreadID = topicID
+				}
+				_ = d.botAPI.SendChatAction(params)
+			}
+		}
+	}()
+
 	result := <-resultCh
+	close(typingDone)
+
 	if result.Err != nil {
-		d.editOrReply(chatID, topicID, thinkingMsgID, replyToID, fmt.Sprintf("❌ 执行失败: %v", result.Err))
+		d.replyTo(chatID, topicID, replyToID, fmt.Sprintf("❌ 执行失败: %v", result.Err))
 		return
 	}
 	d.react(chatID, replyToID, "✅")
-	d.sendOutputWithThinking(chatID, topicID, thinkingMsgID, replyToID, result.Output)
+	d.sendOutputTo(chatID, topicID, replyToID, result.Output)
 }
 
 // sendOutputTo 处理超长输出，首段 quote 触发消息，后续段直接发送。
