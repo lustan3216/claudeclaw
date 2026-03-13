@@ -4,11 +4,14 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"time"
 
 	"github.com/lustan3216/goclaudeclaw/internal/config"
 )
@@ -27,6 +30,7 @@ type mcpFile struct {
 
 // ApplyConfig 根据 cfg.MCPs 生成/更新 workspace/.mcp.json。
 // 只写入 token 不为空（或 enabled=true）的服务器，其余跳过。
+// 写入完成后会在后台 pre-warm 所有 npx 包的缓存，避免 Claude 启动时因首次下载超时。
 func ApplyConfig(workspace string, mcps config.MCPsConfig) error {
 	servers := make(map[string]serverDef)
 
@@ -99,7 +103,31 @@ func ApplyConfig(workspace string, mcps config.MCPsConfig) error {
 	}
 
 	slog.Info("MCP 配置已更新", "path", dest, "servers", keys(servers))
+
+	// 后台 pre-warm：提前下载/缓存所有 npx 包，避免 Claude 启动 MCP 时因首次下载超时
+	go prewarmNpxPackages(servers)
+
 	return nil
+}
+
+// prewarmNpxPackages 后台并发运行 `npx -y <package> --version`，
+// 触发 npm 下载并缓存，后续 Claude 启动 MCP server 时直接使用本地缓存。
+func prewarmNpxPackages(servers map[string]serverDef) {
+	for name, srv := range servers {
+		if srv.Command != "npx" || len(srv.Args) < 2 {
+			continue
+		}
+		pkg := srv.Args[1] // npx -y <package>
+		go func(serverName, pkg string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			// 用 --version 触发下载，忽略输出和错误（有些包不支持 --version 也没关系）
+			cmd := exec.CommandContext(ctx, "npx", "-y", pkg, "--version")
+			cmd.Env = os.Environ()
+			_ = cmd.Run()
+			slog.Debug("MCP package pre-warm 完成", "server", serverName, "package", pkg)
+		}(name, pkg)
+	}
 }
 
 func keys(m map[string]serverDef) []string {
