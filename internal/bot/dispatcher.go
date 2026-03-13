@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	tu "github.com/mymmrac/telego/telegoutil"
+
 	"github.com/mymmrac/telego"
 
 	"github.com/lustan3216/goclaudeclaw/internal/config"
@@ -300,9 +302,7 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 		return
 	}
 
-	// 前台任务：等待结果后回复
-	d.reply(chatID, topicID, "⏳ 处理中...")
-
+	// 前台任务：显示 typing 指示器直到结果返回
 	resultCh := make(chan runner.Result, 1)
 	d.runnerMgr.Submit(runner.Job{
 		Ctx:       ctx,
@@ -315,7 +315,29 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 		ResultCh:  resultCh,
 	})
 
+	// 每 4 秒刷新一次 typing 状态（Telegram typing 提示 5 秒自动消失）
+	typingDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(4 * time.Second)
+		defer ticker.Stop()
+		chatIDObj := tu.ID(chatID)
+		params := &telego.SendChatActionParams{ChatID: chatIDObj, Action: telego.ChatActionTyping}
+		if topicID > 0 {
+			params.MessageThreadID = topicID
+		}
+		_ = d.botAPI.SendChatAction(params)
+		for {
+			select {
+			case <-ticker.C:
+				_ = d.botAPI.SendChatAction(params)
+			case <-typingDone:
+				return
+			}
+		}
+	}()
+
 	result := <-resultCh
+	close(typingDone)
 	if result.Err != nil {
 		d.reply(chatID, topicID, fmt.Sprintf("❌ 执行失败: %v", result.Err))
 		return
