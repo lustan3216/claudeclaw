@@ -4,10 +4,14 @@
 package bot
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -150,7 +154,27 @@ func (d *Dispatcher) Handle(ctx context.Context, update telego.Update) {
 		return
 	}
 
-	// 处理图片消息：取最高分辨率的 PhotoSize
+	// 处理语音消息：下载 ogg 文件后调用 Whisper API 转文字
+	if msg.Voice != nil {
+		voiceText, err := d.transcribeVoice(msg.Voice.FileID, msg.Chat.ID)
+		if err != nil {
+			slog.Error("语音转文字失败", "err", err, "chat_id", msg.Chat.ID)
+			d.reply(msg.Chat.ID, topicID, fmt.Sprintf("❌ 语音转文字失败: %v", err))
+			return
+		}
+		text := "[语音转文字]: " + voiceText
+		d.enqueueWithDebounce(ctx, chatTopicKey{msg.Chat.ID, topicID}, incomingMsg{
+			text:       text,
+			from:       msg.From.Username,
+			chatID:     msg.Chat.ID,
+			topicID:    topicID,
+			messageID:  msg.MessageID,
+			receivedAt: time.Now(),
+		})
+		return
+	}
+
+	// 处理图片消息：取最高分辨率的 PhotoSize，base64 编码嵌入 prompt 供 Claude Vision 使用
 	if len(msg.Photo) > 0 {
 		photo := msg.Photo[len(msg.Photo)-1] // 最后一项分辨率最高
 		savedPath, err := d.downloadTelegramFile(photo.FileID, msg.Chat.ID, "photo.jpg")
@@ -160,7 +184,22 @@ func (d *Dispatcher) Handle(ctx context.Context, update telego.Update) {
 			return
 		}
 		caption := strings.TrimSpace(msg.Caption)
-		text := fmt.Sprintf("[用户发送了图片: %s]", savedPath)
+
+		// 尝试读取并 base64 编码图片；超过 5MB 则退回文件路径模式
+		const maxImageBytes = 5 * 1024 * 1024
+		var text string
+		if imgBytes, readErr := os.ReadFile(savedPath); readErr == nil && len(imgBytes) <= maxImageBytes {
+			b64 := base64.StdEncoding.EncodeToString(imgBytes)
+			text = fmt.Sprintf("[图片]\n<image>\n<media_type>image/jpeg</media_type>\n<data>%s</data>\n</image>", b64)
+		} else {
+			// 文件过大或读取失败，退回路径模式
+			if readErr != nil {
+				slog.Warn("读取图片文件失败，退回路径模式", "err", readErr, "path", savedPath)
+			} else {
+				slog.Warn("图片超过 5MB，退回路径模式", "size", len(imgBytes), "path", savedPath)
+			}
+			text = fmt.Sprintf("[用户发送了图片: %s]", savedPath)
+		}
 		if caption != "" {
 			text += "\n" + caption
 		}
@@ -193,7 +232,12 @@ func (d *Dispatcher) Handle(ctx context.Context, update telego.Update) {
 		if mimeType == "" {
 			mimeType = "application/octet-stream"
 		}
-		text := fmt.Sprintf("[用户发送了文件: %s (%s)]", savedPath, mimeType)
+		var text string
+		if mimeType == "application/pdf" {
+			text = fmt.Sprintf("[用户发送了PDF文件，请使用Read工具查看内容: %s]", savedPath)
+		} else {
+			text = fmt.Sprintf("[用户发送了文件: %s (%s)]", savedPath, mimeType)
+		}
 		if caption != "" {
 			text += "\n" + caption
 		}
@@ -481,6 +525,93 @@ func (d *Dispatcher) isAllowed(userID int64) bool {
 		}
 	}
 	return false
+}
+
+// openAIAPIKey 返回有效的 OpenAI API 密钥：优先使用 BotConfig 字段，其次读环境变量。
+func (d *Dispatcher) openAIAPIKey() string {
+	if k := d.botCfg.OpenAIAPIKey; k != "" {
+		return k
+	}
+	return os.Getenv("OPENAI_API_KEY")
+}
+
+// transcribeVoice 下载 Telegram 语音文件（ogg）并通过 Whisper API 转为文字。
+func (d *Dispatcher) transcribeVoice(fileID string, chatID int64) (string, error) {
+	apiKey := d.openAIAPIKey()
+	if apiKey == "" {
+		return "", fmt.Errorf("未配置 OpenAI API key（openai_api_key 或 OPENAI_API_KEY）")
+	}
+
+	// 下载 ogg 文件到 inbox
+	savedPath, err := d.downloadTelegramFile(fileID, chatID, "voice.ogg")
+	if err != nil {
+		return "", fmt.Errorf("下载语音文件失败: %w", err)
+	}
+
+	// 读取文件内容
+	audioBytes, err := os.ReadFile(savedPath)
+	if err != nil {
+		return "", fmt.Errorf("读取语音文件失败: %w", err)
+	}
+
+	// 构造 multipart 请求体
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+
+	// model 字段
+	if err := mw.WriteField("model", "whisper-1"); err != nil {
+		return "", fmt.Errorf("写入 multipart model 字段失败: %w", err)
+	}
+
+	// file 字段
+	fw, err := mw.CreateFormFile("file", "voice.ogg")
+	if err != nil {
+		return "", fmt.Errorf("创建 multipart file 字段失败: %w", err)
+	}
+	if _, err := fw.Write(audioBytes); err != nil {
+		return "", fmt.Errorf("写入音频数据失败: %w", err)
+	}
+	if err := mw.Close(); err != nil {
+		return "", fmt.Errorf("关闭 multipart writer 失败: %w", err)
+	}
+
+	// 发送请求到 Whisper API
+	req, err := http.NewRequest(http.MethodPost, "https://api.openai.com/v1/audio/transcriptions", &buf)
+	if err != nil {
+		return "", fmt.Errorf("创建 HTTP 请求失败: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("调用 Whisper API 失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("读取 Whisper 响应失败: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("Whisper API 返回错误 %d: %s", resp.StatusCode, string(body))
+	}
+
+	// 解析响应：{"text": "..."}
+	var result struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("解析 Whisper 响应失败: %w", err)
+	}
+
+	slog.Info("语音转文字完成",
+		"chat_id", chatID,
+		"chars", len(result.Text),
+		"bot", d.botCfg.Name)
+
+	return result.Text, nil
 }
 
 // downloadTelegramFile 通过 Telegram Bot API 下载文件，

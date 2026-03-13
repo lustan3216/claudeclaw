@@ -19,11 +19,13 @@ bots:
     token: "TOKEN_1"                    # BotFather 获取
     allowed_users: [123456789]          # Telegram user ID 白名单，必填
     debounce_ms: 1500                   # 防抖窗口（毫秒），窗口内消息合并后发给 claude
+    openai_api_key: ""                  # 语音转文字（Whisper API）；留空则读 OPENAI_API_KEY 环境变量
 
   - name: "work"
     token: "TOKEN_2"
     allowed_users: [123456789, 987654321]
     debounce_ms: 500                    # 工作 bot 响应更快
+    openai_api_key: ""                  # 语音转文字（Whisper API）；留空则读 OPENAI_API_KEY 环境变量
 
 # ── 记忆服务 ───────────────────────────────────────────────────────────────────
 # 所有 bot 共享同一个 claude-mem 实例（相同的长期记忆）

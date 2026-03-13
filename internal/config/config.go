@@ -17,6 +17,7 @@ type BotConfig struct {
 	Token        string  `mapstructure:"token"`
 	AllowedUsers []int64 `mapstructure:"allowed_users"`
 	DebounceMs   int     `mapstructure:"debounce_ms"`
+	OpenAIAPIKey string  `mapstructure:"openai_api_key"` // Whisper 语音转文字，留空则读 OPENAI_API_KEY 环境变量
 }
 
 // QuietWindow 定义心跳静默时间段（本地时间）。
