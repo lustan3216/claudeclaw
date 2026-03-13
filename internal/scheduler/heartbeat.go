@@ -4,6 +4,7 @@ package scheduler
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/lustan3216/goclaudeclaw/internal/config"
@@ -117,8 +118,9 @@ func (h *Heartbeat) fire(ctx context.Context, t time.Time) {
 			slog.Warn("心跳任务失败", "err", result.Err)
 			return
 		}
-		if result.Output != "" {
-			h.sendFn(h.cfg.ChatID, h.cfg.TopicID, result.Output)
+		output := strings.TrimSpace(result.Output)
+		if output != "" && !strings.Contains(output, "HEARTBEAT_OK") {
+			h.sendFn(h.cfg.ChatID, h.cfg.TopicID, output)
 		}
 	}()
 }
