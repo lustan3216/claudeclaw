@@ -26,6 +26,7 @@ type incomingMsg struct {
 	from       string
 	chatID     int64
 	topicID    int // 0 = 普通聊天，>0 = 论坛话题 ID
+	messageID  int // 用于回复指定消息
 	receivedAt time.Time
 }
 
@@ -155,6 +156,7 @@ func (d *Dispatcher) Handle(ctx context.Context, update telego.Update) {
 		from:       msg.From.Username,
 		chatID:     msg.Chat.ID,
 		topicID:    topicID,
+		messageID:  msg.MessageID,
 		receivedAt: time.Now(),
 	})
 }
@@ -215,7 +217,7 @@ func (d *Dispatcher) handleCommand(ctx context.Context, msg *telego.Message, top
 			d.reply(chatID, topicID, "用法: /bg <任务描述>")
 			return
 		}
-		d.dispatchJob(ctx, chatID, topicID, args, runner.ModeBackground)
+		d.dispatchJob(ctx, chatID, topicID, msg.MessageID, args, runner.ModeBackground)
 	default:
 		d.reply(chatID, topicID, "未知命令，发送 /help 查看帮助。")
 	}
@@ -265,19 +267,23 @@ func (d *Dispatcher) enqueueWithDebounce(ctx context.Context, key chatTopicKey, 
 			"combined_len", len(combined),
 			"bot", d.botCfg.Name)
 
+		// 取最后一条消息的 ID 作为回复目标
+		lastMsgID := msgs[len(msgs)-1].messageID
+
 		// 异步分类和分发，不阻塞防抖 goroutine
 		go func() {
 			mode := d.classifier.Classify(ctx, combined)
-			d.dispatchJob(ctx, key.chatID, key.topicID, combined, mode)
+			d.dispatchJob(ctx, key.chatID, key.topicID, lastMsgID, combined, mode)
 		}()
 	})
 }
 
 // dispatchJob 将任务提交到 runner，并处理 Telegram 回复。
-func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int, prompt string, mode runner.TaskMode) {
+// replyToID 为触发本次任务的最后一条消息 ID，回复时 quote 该消息。
+func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int, replyToID int, prompt string, mode runner.TaskMode) {
 	// 后台任务：立即回复用户，异步执行
 	if mode == runner.ModeBackground {
-		d.reply(chatID, topicID, "⏳ 已在后台处理，完成后通知你。")
+		d.replyTo(chatID, topicID, replyToID, "⏳ 已在后台处理，完成后通知你。")
 
 		resultCh := make(chan runner.Result, 1)
 		d.runnerMgr.Submit(runner.Job{
@@ -294,10 +300,10 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 		go func() {
 			result := <-resultCh
 			if result.Err != nil {
-				d.reply(chatID, topicID, fmt.Sprintf("❌ 后台任务失败: %v", result.Err))
+				d.replyTo(chatID, topicID, replyToID, fmt.Sprintf("❌ 后台任务失败: %v", result.Err))
 				return
 			}
-			d.sendOutput(chatID, topicID, result.Output)
+			d.sendOutputTo(chatID, topicID, replyToID, result.Output)
 		}()
 		return
 	}
@@ -339,21 +345,22 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 	result := <-resultCh
 	close(typingDone)
 	if result.Err != nil {
-		d.reply(chatID, topicID, fmt.Sprintf("❌ 执行失败: %v", result.Err))
+		d.replyTo(chatID, topicID, replyToID, fmt.Sprintf("❌ 执行失败: %v", result.Err))
 		return
 	}
-	d.sendOutput(chatID, topicID, result.Output)
+	d.sendOutputTo(chatID, topicID, replyToID, result.Output)
 }
 
-// sendOutput 处理超长输出，分段发送（每段最多 4000 字符）。
-func (d *Dispatcher) sendOutput(chatID int64, topicID int, output string) {
+// sendOutputTo 处理超长输出，首段 quote 触发消息，后续段直接发送。
+func (d *Dispatcher) sendOutputTo(chatID int64, topicID int, replyToID int, output string) {
 	if output == "" {
-		d.reply(chatID, topicID, "✓ 完成（无输出）")
+		d.replyTo(chatID, topicID, replyToID, "✓ 完成（无输出）")
 		return
 	}
 
 	const maxLen = 4000
 	runes := []rune(output)
+	first := true
 
 	for len(runes) > 0 {
 		chunk := runes
@@ -363,28 +370,41 @@ func (d *Dispatcher) sendOutput(chatID int64, topicID int, output string) {
 		} else {
 			runes = nil
 		}
-		d.reply(chatID, topicID, string(chunk))
+		if first {
+			d.replyTo(chatID, topicID, replyToID, string(chunk))
+			first = false
+		} else {
+			d.reply(chatID, topicID, string(chunk))
+		}
 	}
 }
 
-// reply 向指定 chat（可选 topic）发送文本消息，错误只记录日志不抛出。
-func (d *Dispatcher) reply(chatID int64, topicID int, text string) {
+// replyTo 回复指定消息（quote），若 replyToID <= 0 则退化为普通发送。
+func (d *Dispatcher) replyTo(chatID int64, topicID int, replyToID int, text string) {
 	params := &telego.SendMessageParams{
 		ChatID:    telego.ChatID{ID: chatID},
 		Text:      text,
 		ParseMode: telego.ModeMarkdown,
 	}
-	// 若在 topic 内，将回复发到同一 topic 线程
 	if topicID > 0 {
 		params.MessageThreadID = topicID
 	}
-	if _, err := d.botAPI.SendMessage(params); err != nil {
-		slog.Error("发送 Telegram 消息失败",
-			"chat_id", chatID,
-			"topic_id", topicID,
-			"err", err,
-			"bot", d.botCfg.Name)
+	if replyToID > 0 {
+		params.ReplyParameters = &telego.ReplyParameters{MessageID: replyToID}
 	}
+	if _, err := d.botAPI.SendMessage(params); err != nil {
+		// Markdown 解析失败时降级为纯文本重试
+		params.ParseMode = ""
+		if _, err2 := d.botAPI.SendMessage(params); err2 != nil {
+			slog.Error("发送 Telegram 消息失败",
+				"chat_id", chatID, "topic_id", topicID, "err", err2, "bot", d.botCfg.Name)
+		}
+	}
+}
+
+// reply 向指定 chat（可选 topic）发送文本消息，不 quote 任何消息。
+func (d *Dispatcher) reply(chatID int64, topicID int, text string) {
+	d.replyTo(chatID, topicID, 0, text)
 }
 
 // isAllowed 检查用户是否在白名单中。
