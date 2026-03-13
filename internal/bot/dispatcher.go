@@ -505,9 +505,16 @@ func (d *Dispatcher) maybeUpdateMemory(ctx context.Context, chatID int64, topicI
 
 	slog.Info("触发记忆更新", "chat_id", chatID, "topic_id", topicID, "count", count)
 
-	prompt := "請根據以上對話，靜默更新工作目錄下的 .goclaudeclaw/memory.md 文件，" +
-		"記錄對未來對話有幫助的上下文、用戶偏好、重要決策和項目知識。" +
-		"保持文件簡潔，以 Markdown 格式組織。不需要回覆任何其他內容。"
+	prompt := "請根據以上對話，靜默更新工作目錄下的 .goclaudeclaw/memory.md 文件。\n" +
+		"文件格式使用 section 標記，每個 section 包含雙語（中英文）tags，方便相關性匹配：\n\n" +
+		"<!-- section: global tags: always -->\n" +
+		"## 全局偏好\n" +
+		"（用戶偏好、語言設定等，每次都注入）\n\n" +
+		"<!-- section: project-name tags: 英文tag,中文tag,別名,... -->\n" +
+		"## 項目名稱\n" +
+		"（項目相關知識）\n\n" +
+		"Tags 規則：同一概念的中英文都要寫，例如 'hn,永旺,lottery,彩票'。\n" +
+		"保持每個 section 簡潔，不超過 300 字。不需要回覆任何其他內容。"
 
 	resultCh := make(chan runner.Result, 1)
 	d.runnerMgr.Submit(runner.Job{

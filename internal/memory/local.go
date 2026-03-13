@@ -53,6 +53,28 @@ func (m *LocalMemory) Save(content string) error {
 	return os.Rename(tmp, path)
 }
 
+// LoadRelevant 读取 memory.md，按 prompt 相关性选出 sections 后返回注入内容。
+// 优先注入 "always" tagged sections，再按 tag 命中数注入其他相关 sections。
+// 若文件不存在或无内容，返回空字符串。
+func (m *LocalMemory) LoadRelevant(prompt string) (string, error) {
+	path := filepath.Join(m.workspace, localMemoryFile)
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("读取记忆文件失败: %w", err)
+	}
+	content := strings.TrimSpace(string(data))
+	if content == "" {
+		return "", nil
+	}
+
+	sections := ParseSections(content)
+	selected := SelectRelevant(sections, prompt)
+	return BuildInjection(selected), nil
+}
+
 // InjectPrefix 将记忆内容拼接到 prompt 前面。
 // 若记忆为空则直接返回原 prompt。
 func InjectPrefix(memory, prompt string) string {

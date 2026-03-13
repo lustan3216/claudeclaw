@@ -105,6 +105,21 @@ Set `openai_api_key` in config (or `OPENAI_API_KEY` env var) to enable voice.
 
 Place notes in `{workspace}/.goclaudeclaw/memory.md`. On every new session, this file is automatically injected as context — giving Claude persistent knowledge about your project, preferences, and decisions without needing an external service.
 
+**Smart injection:** memory.md is split into tagged sections. On each new session, only sections relevant to the current prompt are injected — saving tokens and keeping context focused.
+
+Section format:
+```markdown
+<!-- section: global tags: always -->
+## Global preferences
+Always injected (keep short).
+
+<!-- section: hn tags: hn,永旺,lottery,彩票,nestjs -->
+## HN Project
+Injected only when the prompt mentions hn/永旺/lottery/etc.
+```
+
+Tags should include both Chinese and English synonyms — e.g. `hn,永旺,lottery,彩票`. Claude auto-generates tags when updating memory.
+
 Three config knobs control automatic memory lifecycle:
 
 | Field | Default | What it does |

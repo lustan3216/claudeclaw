@@ -135,14 +135,15 @@ func (m *Manager) execute(job Job) Result {
 	isNewSession := sessionID == ""
 
 	// 新会话时注入本地记忆（省 token：续会话已有 context）
+	// 使用 section 相关性评分，只注入与当前 prompt 相关的 section
 	prompt := job.Prompt
 	if isNewSession {
 		localMem := memory.NewLocalMemory(job.Workspace)
-		if memContent, err := localMem.Load(); err != nil {
+		if memContent, err := localMem.LoadRelevant(job.Prompt); err != nil {
 			slog.Warn("读取本地记忆失败，跳过注入", "err", err)
 		} else if memContent != "" {
 			prompt = memory.InjectPrefix(memContent, prompt)
-			slog.Debug("已注入本地记忆", "memory_len", len(memContent))
+			slog.Debug("已注入相关记忆", "memory_len", len(memContent))
 		}
 	}
 	job.Prompt = prompt
