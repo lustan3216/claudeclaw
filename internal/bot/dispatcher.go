@@ -14,6 +14,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -59,6 +60,9 @@ type Dispatcher struct {
 	countsMu         sync.Mutex
 	completionCounts map[chatTopicKey]int // chat+topic → 成功完成次数（用于触发记忆更新/摘要）
 	memUpdateCount   int                  // 全局 memory 更新次数（用于触发 memory.md 压缩）
+
+	autoUpdateMu      sync.Mutex
+	autoUpdateRunning bool // 防止同时启动多个后台更新
 
 	runnerMgr  *runner.Manager
 	sessionMgr *session.Manager
@@ -124,6 +128,11 @@ func (d *Dispatcher) Handle(ctx context.Context, update telego.Update) {
 	topicID := 0
 	if msg.IsTopicMessage {
 		topicID = msg.MessageThreadID
+	}
+
+	// auto_update=true 时，每次收到消息都在后台检查并拉取最新版本
+	if d.cfgMgr != nil && d.cfgMgr.Get().AutoUpdate {
+		go d.triggerAutoUpdate()
 	}
 
 	// 处理论坛话题生命周期事件（服务消息，无文本内容）
@@ -434,6 +443,80 @@ func (d *Dispatcher) handleCommand(ctx context.Context, msg *telego.Message, top
 }
 
 // buildUsageReport 统计 ~/.claude/projects/ 下今日 token 用量。
+// triggerAutoUpdate 检查 GitHub 是否有新提交，有则后台 git pull + rebuild → goclaudeclaw.new。
+// 使用 autoUpdateRunning 标志防止并发。
+func (d *Dispatcher) triggerAutoUpdate() {
+	d.autoUpdateMu.Lock()
+	if d.autoUpdateRunning {
+		d.autoUpdateMu.Unlock()
+		return
+	}
+	d.autoUpdateRunning = true
+	d.autoUpdateMu.Unlock()
+
+	defer func() {
+		d.autoUpdateMu.Lock()
+		d.autoUpdateRunning = false
+		d.autoUpdateMu.Unlock()
+	}()
+
+	// 检查远程是否有新提交（不拉取，只 fetch 单个 commit）
+	fetchCmd := exec.Command("git", "-C", d.workspace, "fetch", "origin", "main", "--depth=1")
+	fetchCmd.Env = os.Environ()
+	if err := fetchCmd.Run(); err != nil {
+		return
+	}
+
+	localCmd := exec.Command("git", "-C", d.workspace, "rev-parse", "HEAD")
+	localOut, err := localCmd.Output()
+	if err != nil {
+		return
+	}
+	remoteCmd := exec.Command("git", "-C", d.workspace, "rev-parse", "origin/main")
+	remoteOut, err := remoteCmd.Output()
+	if err != nil {
+		return
+	}
+
+	local := strings.TrimSpace(string(localOut))
+	remote := strings.TrimSpace(string(remoteOut))
+	if local == remote {
+		return // 已是最新，不需要更新
+	}
+
+	// 有新版本，拉取并编译
+	slog.Info("auto_update: 检测到新版本，后台编译中", "local", local[:8], "remote", remote[:8])
+
+	pullCmd := exec.Command("git", "-C", d.workspace, "pull", "origin", "main")
+	pullCmd.Env = os.Environ()
+	if err := pullCmd.Run(); err != nil {
+		slog.Warn("auto_update: git pull 失败", "err", err)
+		return
+	}
+
+	gobin := os.Getenv("GOBIN")
+	if gobin == "" {
+		gobin = "/data/go/go/bin/go"
+	}
+	versionCmd := exec.Command("git", "-C", d.workspace, "describe", "--tags", "--always")
+	versionOut, _ := versionCmd.Output()
+	version := strings.TrimSpace(string(versionOut))
+	if version == "" {
+		version = "dev"
+	}
+
+	ldflags := "-X github.com/lustan3216/goclaudeclaw/internal/buildinfo.Version=" + version
+	buildCmd := exec.Command(gobin, "build", "-ldflags", ldflags, "-o", filepath.Join(d.workspace, "goclaudeclaw.new"), "./cmd/goclaudeclaw/")
+	buildCmd.Dir = d.workspace
+	buildCmd.Env = os.Environ()
+	if err := buildCmd.Run(); err != nil {
+		slog.Warn("auto_update: 编译失败", "err", err)
+		_ = os.Remove(filepath.Join(d.workspace, "goclaudeclaw.new"))
+		return
+	}
+	slog.Info("auto_update: 新版本已就绪，下次重启生效", "version", version)
+}
+
 func (d *Dispatcher) buildUsageReport() string {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {

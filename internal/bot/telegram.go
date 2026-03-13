@@ -51,6 +51,19 @@ func NewBot(
 		"bot_name", botCfg.Name,
 		"username", self.Username)
 
+	// 注册指令选单，让用户在 Telegram 中看到 "/" 指令列表
+	_ = api.SetMyCommands(&telego.SetMyCommandsParams{
+		Commands: []telego.BotCommand{
+			{Command: "help", Description: "查看所有指令"},
+			{Command: "clear", Description: "清除 session，重载 MCP"},
+			{Command: "usage", Description: "今日 token 用量统计"},
+			{Command: "status", Description: "查看运行状态"},
+			{Command: "update", Description: "立即重启并拉取最新版本"},
+			{Command: "config", Description: "查看当前 MCP 配置"},
+			{Command: "bg", Description: "强制后台模式运行任务"},
+		},
+	})
+
 	dispatcher := NewDispatcher(api, botCfg, globalCfg, cfgMgr, runnerMgr, sessionMgr, workspace)
 
 	return &Bot{
