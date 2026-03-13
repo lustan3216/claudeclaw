@@ -40,7 +40,9 @@ while true; do
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] [bg] 拉取最新代碼..." >> "$LOG"
             git pull origin main >> "$LOG" 2>&1
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] [bg] 編譯中..." >> "$LOG"
-            if $GOBIN build -o goclaudeclaw.new ./cmd/goclaudeclaw/ >> "$LOG" 2>&1; then
+            VERSION=$(git describe --tags --always 2>/dev/null || git rev-parse --short HEAD 2>/dev/null || echo "dev")
+            LDFLAGS="-X github.com/lustan3216/goclaudeclaw/internal/buildinfo.Version=$VERSION"
+            if $GOBIN build -ldflags "$LDFLAGS" -o goclaudeclaw.new ./cmd/goclaudeclaw/ >> "$LOG" 2>&1; then
                 echo "[$(date '+%Y-%m-%d %H:%M:%S')] [bg] 新版本已就緒，下次重啟生效" | tee -a "$LOG"
             else
                 rm -f goclaudeclaw.new

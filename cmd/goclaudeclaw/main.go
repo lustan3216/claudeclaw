@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/lustan3216/goclaudeclaw/internal/bot"
+	"github.com/lustan3216/goclaudeclaw/internal/buildinfo"
 	"github.com/lustan3216/goclaudeclaw/internal/config"
 	"github.com/lustan3216/goclaudeclaw/internal/daemon"
 	"github.com/lustan3216/goclaudeclaw/internal/mcp"
@@ -29,8 +30,9 @@ import (
 	"github.com/lustan3216/goclaudeclaw/internal/session"
 )
 
-// version 在构建时通过 -ldflags "-X main.version=x.y.z" 注入。
-var version = "dev"
+// version 在构建时通过 ldflags 注入到 buildinfo.Version。
+// 保留此变量用于 cobra root 命令的 Version 字段。
+var version = buildinfo.Version
 
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
