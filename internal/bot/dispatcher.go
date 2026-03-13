@@ -56,7 +56,8 @@ type Dispatcher struct {
 	debounce map[chatTopicKey]*debounceState // chat+topic → 防抖状态
 
 	countsMu         sync.Mutex
-	completionCounts map[chatTopicKey]int // chat+topic → 成功完成次数（用于触发记忆更新）
+	completionCounts map[chatTopicKey]int // chat+topic → 成功完成次数（用于触发记忆更新/摘要）
+	memUpdateCount   int                  // 全局 memory 更新次数（用于触发 memory.md 压缩）
 
 	runnerMgr  *runner.Manager
 	sessionMgr *session.Manager
@@ -417,6 +418,7 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 			d.react(chatID, replyToID, "✅")
 			d.sendOutputTo(chatID, topicID, replyToID, result.Output)
 			d.maybeUpdateMemory(ctx, chatID, topicID)
+			d.maybeSummarizeSession(ctx, chatID, topicID)
 		}()
 		return
 	}
@@ -480,6 +482,7 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 	d.react(chatID, replyToID, "✅")
 	d.sendOutputTo(chatID, topicID, replyToID, result.Output)
 	d.maybeUpdateMemory(ctx, chatID, topicID)
+	d.maybeSummarizeSession(ctx, chatID, topicID)
 }
 
 // maybeUpdateMemory 在每 N 次成功完成后静默触发 memory.md 更新。
@@ -518,13 +521,108 @@ func (d *Dispatcher) maybeUpdateMemory(ctx context.Context, chatID int64, topicI
 		ResultCh:  resultCh,
 	})
 
-	// 丢弃结果，只记录日志
+	// 丢弃结果，只记录日志；成功后检查是否需要压缩 memory.md
 	go func() {
 		result := <-resultCh
 		if result.Err != nil {
 			slog.Warn("记忆更新失败", "err", result.Err, "chat_id", chatID, "topic_id", topicID)
+			return
+		}
+		slog.Info("记忆更新完成", "chat_id", chatID, "topic_id", topicID)
+		d.maybeCompressMemory(ctx, chatID, topicID)
+	}()
+}
+
+// maybeCompressMemory 在每 N 次 memory 更新后静默压缩 memory.md，去重并精简。
+func (d *Dispatcher) maybeCompressMemory(ctx context.Context, chatID int64, topicID int) {
+	interval := d.botCfg.MemoryCompressInterval
+	if interval <= 0 {
+		return
+	}
+
+	d.countsMu.Lock()
+	d.memUpdateCount++
+	count := d.memUpdateCount
+	d.countsMu.Unlock()
+
+	if count%interval != 0 {
+		return
+	}
+
+	slog.Info("触发 memory.md 压缩", "count", count)
+
+	prompt := "請閱讀工作目錄下的 .goclaudeclaw/memory.md，" +
+		"去除重複內容、合并相似條目、刪除過時資訊，重新整理成簡潔的 Markdown。" +
+		"直接覆寫原文件，不需要回覆任何其他內容。"
+
+	resultCh := make(chan runner.Result, 1)
+	d.runnerMgr.Submit(runner.Job{
+		Ctx:       ctx,
+		Workspace: d.workspace,
+		BotName:   d.botCfg.Name,
+		ChatID:    chatID,
+		TopicID:   topicID,
+		Prompt:    prompt,
+		Mode:      runner.ModeForeground,
+		ResultCh:  resultCh,
+	})
+
+	go func() {
+		result := <-resultCh
+		if result.Err != nil {
+			slog.Warn("memory.md 压缩失败", "err", result.Err)
 		} else {
-			slog.Info("记忆更新完成", "chat_id", chatID, "topic_id", topicID)
+			slog.Info("memory.md 压缩完成")
+		}
+	}()
+}
+
+// maybeSummarizeSession 在每 N 次成功完成后，摘要对话内容写入 memory.md 并重置 session。
+// 下次对话从全新 session 开始，但摘要会通过 memory.md 注入保持上下文连续性。
+func (d *Dispatcher) maybeSummarizeSession(ctx context.Context, chatID int64, topicID int) {
+	interval := d.botCfg.SessionSummarizeInterval
+	if interval <= 0 {
+		return
+	}
+
+	key := chatTopicKey{chatID, topicID}
+	d.countsMu.Lock()
+	count := d.completionCounts[key]
+	d.countsMu.Unlock()
+
+	if count%interval != 0 {
+		return
+	}
+
+	slog.Info("触发对话摘要并重置 session", "chat_id", chatID, "topic_id", topicID, "count", count)
+
+	prompt := "請將以上完整對話整理成摘要，" +
+		"更新工作目錄下的 .goclaudeclaw/memory.md 文件的 '## 對話摘要' 部分，" +
+		"保留重要決策、用戶偏好和關鍵上下文。完成後不需要回覆任何其他內容。"
+
+	resultCh := make(chan runner.Result, 1)
+	d.runnerMgr.Submit(runner.Job{
+		Ctx:       ctx,
+		Workspace: d.workspace,
+		BotName:   d.botCfg.Name,
+		ChatID:    chatID,
+		TopicID:   topicID,
+		Prompt:    prompt,
+		Mode:      runner.ModeForeground,
+		ResultCh:  resultCh,
+	})
+
+	go func() {
+		result := <-resultCh
+		if result.Err != nil {
+			slog.Warn("对话摘要失败，保留原 session", "err", result.Err, "chat_id", chatID, "topic_id", topicID)
+			return
+		}
+		// 摘要成功后清除 session，下次对话重新开始（memory.md 已有摘要）
+		if err := d.sessionMgr.Clear(d.workspace, d.botCfg.Name, chatID, topicID); err != nil {
+			slog.Warn("清除 session 失败", "err", err)
+		} else {
+			slog.Info("对话已摘要，session 已重置", "chat_id", chatID, "topic_id", topicID)
 		}
 	}()
 }

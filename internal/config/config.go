@@ -18,7 +18,9 @@ type BotConfig struct {
 	AllowedUsers        []int64 `mapstructure:"allowed_users"`
 	DebounceMs          int     `mapstructure:"debounce_ms"`
 	OpenAIAPIKey        string  `mapstructure:"openai_api_key"`        // Whisper 语音转文字，留空则读 OPENAI_API_KEY 环境变量
-	MemoryUpdateInterval int    `mapstructure:"memory_update_interval"` // 每 N 次成功完成后更新 memory.md，0 = 禁用
+	MemoryUpdateInterval      int `mapstructure:"memory_update_interval"`      // 每 N 次成功完成后更新 memory.md，0 = 禁用
+	SessionSummarizeInterval  int `mapstructure:"session_summarize_interval"`  // 每 N 次成功完成后摘要对话并重置 session，0 = 禁用
+	MemoryCompressInterval    int `mapstructure:"memory_compress_interval"`    // 每 N 次 memory 更新后压缩 memory.md，0 = 禁用
 }
 
 // QuietWindow 定义心跳静默时间段（本地时间）。

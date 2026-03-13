@@ -7,7 +7,9 @@
       "allowed_users": [381215786],
       "debounce_ms": 1500,
       "openai_api_key": "",
-      "memory_update_interval": 5
+      "memory_update_interval": 5,
+      "session_summarize_interval": 20,
+      "memory_compress_interval": 10
     }
   ],
   "security": {

@@ -105,7 +105,13 @@ Set `openai_api_key` in config (or `OPENAI_API_KEY` env var) to enable voice.
 
 Place notes in `{workspace}/.goclaudeclaw/memory.md`. On every new session, this file is automatically injected as context — giving Claude persistent knowledge about your project, preferences, and decisions without needing an external service.
 
-Set `memory_update_interval` in bot config to auto-update this file every N completions. Claude silently writes new knowledge back after every N messages — no Telegram reply, just a background update.
+Three config knobs control automatic memory lifecycle:
+
+| Field | Default | What it does |
+|---|---|---|
+| `memory_update_interval` | 0 (off) | Every N completions, Claude silently writes new knowledge to `memory.md` |
+| `session_summarize_interval` | 0 (off) | Every N completions, Claude summarizes the conversation into `memory.md`, then resets the session — keeping context without bloating the history |
+| `memory_compress_interval` | 0 (off) | Every N memory updates, Claude deduplicates and trims `memory.md` to keep it lean |
 
 ### Typing Indicator
 
@@ -142,7 +148,9 @@ Schedule prompts with standard cron syntax. Daily reports, weekly summaries, wha
       "allowed_users": [123456789],
       "debounce_ms": 1500,
       "openai_api_key": "",
-      "memory_update_interval": 5
+      "memory_update_interval": 5,
+      "session_summarize_interval": 20,
+      "memory_compress_interval": 10
     }
   ],
 
