@@ -6,16 +6,45 @@ on:
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
       - uses: actions/setup-go@v5
         with:
           go-version: '1.23'
-      - uses: goreleaser/goreleaser-action@v6
-        with:
-          version: latest
-          args: release --clean
+
+      - name: Build binaries
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          LDFLAGS="-s -w -X github.com/lustan3216/goclaudeclaw/internal/buildinfo.Version=${VERSION}"
+          mkdir -p dist
+
+          for GOOS in linux darwin; do
+            for GOARCH in amd64 arm64; do
+              OUT="dist/goclaudeclaw_${VERSION}_${GOOS}_${GOARCH}.tar.gz"
+              BINARY="goclaudeclaw"
+              CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -ldflags "$LDFLAGS" -o "$BINARY" ./cmd/goclaudeclaw/
+              tar -czf "$OUT" "$BINARY"
+              rm "$BINARY"
+            done
+          done
+
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS" -o goclaudeclaw.exe ./cmd/goclaudeclaw/
+          zip "dist/goclaudeclaw_${VERSION}_windows_amd64.zip" goclaudeclaw.exe
+          rm goclaudeclaw.exe
+
+          cd dist && sha256sum * > checksums.txt
+
+      - name: Create GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          NOTES=$(git log $(git describe --tags --abbrev=0 HEAD^)..HEAD --oneline 2>/dev/null || echo "Initial release")
+          gh release create "$VERSION" dist/* \
+            --title "goclaudeclaw $VERSION" \
+            --notes "$NOTES"
