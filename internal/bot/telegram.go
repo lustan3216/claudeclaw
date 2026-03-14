@@ -56,7 +56,6 @@ func NewBot(
 		Commands: []telego.BotCommand{
 			{Command: "help", Description: "查看所有指令"},
 			{Command: "clear", Description: "清除 session，重载 MCP"},
-			{Command: "stop", Description: "取消当前正在执行的任务"},
 			{Command: "usage", Description: "今日 token 用量统计"},
 			{Command: "status", Description: "查看运行状态"},
 			{Command: "update", Description: "立即重启并拉取最新版本"},

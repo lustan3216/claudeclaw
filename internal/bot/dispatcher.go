@@ -16,10 +16,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/mymmrac/telego"
@@ -46,16 +44,6 @@ type chatTopicKey struct {
 	topicID int
 }
 
-// jobEntry 记录运行中的 job 信息，支持按 ID 取消。
-type jobEntry struct {
-	id      int64
-	chatID  int64
-	topicID int
-	prompt  string // 前 40 字，用于 /stop 列表显示
-	cancel  context.CancelFunc
-	startAt time.Time
-}
-
 // debounceState 跟踪每个 chat+topic 的防抖状态。
 type debounceState struct {
 	timer    *time.Timer
@@ -75,10 +63,6 @@ type Dispatcher struct {
 
 	autoUpdateMu      sync.Mutex
 	autoUpdateRunning bool // 防止同时启动多个后台更新
-
-	jobCounter atomic.Int64
-	cancelMu   sync.Mutex
-	jobMap     map[int64]jobEntry // jobID → 运行中的 job 信息
 
 	runnerMgr  *runner.Manager
 	sessionMgr *session.Manager
@@ -103,7 +87,6 @@ func NewDispatcher(
 	return &Dispatcher{
 		debounce:         make(map[chatTopicKey]*debounceState),
 		completionCounts: make(map[chatTopicKey]int),
-		jobMap:           make(map[int64]jobEntry),
 		runnerMgr:        runnerMgr,
 		sessionMgr:       sessionMgr,
 		classifier:       runner.NewClassifier("claude"),
@@ -125,12 +108,6 @@ func (d *Dispatcher) UpdateConfig(cfg *config.Config, botCfg config.BotConfig) {
 
 // Handle 接收来自 Telegram 的单条消息，进入防抖队列。
 func (d *Dispatcher) Handle(ctx context.Context, update telego.Update) {
-	// 处理 inline button 回调（取消任务按钮）
-	if update.CallbackQuery != nil {
-		d.handleCallback(update.CallbackQuery)
-		return
-	}
-
 	if update.Message == nil {
 		return
 	}
@@ -339,7 +316,6 @@ func (d *Dispatcher) handleCommand(ctx context.Context, msg *telego.Message, top
 				"*💬 對話*\n"+
 				"直接发消息即可与 Claude 对话\n"+
 				"`/clear`          清除 session，重载 MCP\n"+
-				"`/stop`           取消当前正在执行的任务\n"+
 				"`/bg <任务>`      强制后台模式，长任务不堵对话\n"+
 				"`/status`         查看运行状态\n"+
 				"`/usage`          今日 token 用量统计\n\n"+
@@ -459,44 +435,6 @@ func (d *Dispatcher) handleCommand(ctx context.Context, msg *telego.Message, top
 			return
 		}
 		d.dispatchJob(ctx, chatID, topicID, msg.MessageID, args, runner.ModeBackground)
-	case "stop":
-		if args == "" {
-			// 列出该 chat 下所有运行中的 job
-			d.cancelMu.Lock()
-			var lines []string
-			for id, e := range d.jobMap {
-				if e.chatID != chatID {
-					continue
-				}
-				elapsed := time.Since(e.startAt).Round(time.Second)
-				lines = append(lines, fmt.Sprintf("#%d (%s) %s", id, elapsed, e.prompt))
-			}
-			d.cancelMu.Unlock()
-			if len(lines) == 0 {
-				d.reply(chatID, topicID, "没有正在运行的任务")
-			} else {
-				d.reply(chatID, topicID, "运行中的任务：\n"+strings.Join(lines, "\n")+"\n\n用 /stop <id> 取消指定任务")
-			}
-		} else {
-			// 取消指定 job ID
-			id, err := strconv.ParseInt(args, 10, 64)
-			if err != nil {
-				d.reply(chatID, topicID, "用法: /stop [id]  — 不填 id 则列出所有任务")
-				return
-			}
-			d.cancelMu.Lock()
-			e, ok := d.jobMap[id]
-			if ok && e.chatID == chatID {
-				delete(d.jobMap, id)
-				e.cancel()
-			}
-			d.cancelMu.Unlock()
-			if ok {
-				d.reply(chatID, topicID, fmt.Sprintf("🛑 已取消任务 #%d", id))
-			} else {
-				d.reply(chatID, topicID, fmt.Sprintf("找不到任务 #%d", id))
-			}
-		}
 	case "usage":
 		d.reply(chatID, topicID, d.buildUsageReport())
 	default:
@@ -759,51 +697,19 @@ func (d *Dispatcher) enqueueWithDebounce(ctx context.Context, key chatTopicKey, 
 	})
 }
 
-// truncatePrompt 截断 prompt 用于 /stop 列表显示。
-func truncatePrompt(s string, n int) string {
-	runes := []rune(s)
-	if len(runes) <= n {
-		return s
-	}
-	return string(runes[:n]) + "…"
-}
-
 // dispatchJob 将任务提交到 runner，并处理 Telegram 回复。
 // replyToID 为触发本次任务的最后一条消息 ID，回复时 quote 该消息。
 func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int, replyToID int, prompt string, mode runner.TaskMode) {
 	// 收到訊息先打 👀
 	d.react(chatID, replyToID, "👀")
 
-	// 为当前 job 分配唯一 ID，创建独立 cancel
-	jobID := d.jobCounter.Add(1)
-	jobCtx, jobCancel := context.WithCancel(ctx)
-
-	entry := jobEntry{
-		id:      jobID,
-		chatID:  chatID,
-		topicID: topicID,
-		prompt:  truncatePrompt(prompt, 40),
-		cancel:  jobCancel,
-		startAt: time.Now(),
-	}
-	d.cancelMu.Lock()
-	d.jobMap[jobID] = entry
-	d.cancelMu.Unlock()
-
-	cleanup := func() {
-		d.cancelMu.Lock()
-		delete(d.jobMap, jobID)
-		d.cancelMu.Unlock()
-		jobCancel()
-	}
-
-	// 后台任务：立即回复用户（含取消按钮），异步执行
+	// 后台任务：立即回复用户，异步执行
 	if mode == runner.ModeBackground {
-		btnMsgID := d.sendCancelButton(chatID, topicID, replyToID, jobID, "⏳ 后台处理中，完成后通知你。")
+		d.replyTo(chatID, topicID, replyToID, "⏳ 已在后台处理，完成后通知你。")
 
 		resultCh := make(chan runner.Result, 1)
 		d.runnerMgr.Submit(runner.Job{
-			Ctx:       jobCtx,
+			Ctx:       ctx,
 			Workspace: d.workspace,
 			BotName:   d.botCfg.Name,
 			ChatID:    chatID,
@@ -814,21 +720,15 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 		})
 
 		go func() {
-			defer cleanup()
 			result := <-resultCh
-			d.removeInlineKeyboard(chatID, btnMsgID) // 任务结束后移除按钮
 			if result.Err != nil {
-				if jobCtx.Err() != nil {
-					d.replyTo(chatID, topicID, replyToID, "🛑 已取消")
-					return
-				}
 				d.replyTo(chatID, topicID, replyToID, fmt.Sprintf("❌ 后台任务失败: %v", result.Err))
 				return
 			}
 			d.react(chatID, replyToID, "✅")
 			d.sendOutputTo(chatID, topicID, replyToID, result.Output)
-			d.maybeUpdateMemory(jobCtx, chatID, topicID)
-			d.maybeSummarizeSession(jobCtx, chatID, topicID)
+			d.maybeUpdateMemory(ctx, chatID, topicID)
+			d.maybeSummarizeSession(ctx, chatID, topicID)
 		}()
 		return
 	}
@@ -848,7 +748,7 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 
 	resultCh := make(chan runner.Result, 1)
 	d.runnerMgr.Submit(runner.Job{
-		Ctx:       jobCtx,
+		Ctx:       ctx,
 		Workspace: d.workspace,
 		BotName:   d.botCfg.Name,
 		ChatID:    chatID,
@@ -867,8 +767,6 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 			select {
 			case <-typingDone:
 				return
-			case <-jobCtx.Done():
-				return
 			case <-ticker.C:
 				params := &telego.SendChatActionParams{
 					ChatID: telego.ChatID{ID: chatID},
@@ -886,12 +784,7 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 
 	result := <-resultCh
 	close(typingDone)
-	cleanup()
 
-	if jobCtx.Err() != nil {
-		d.replyTo(chatID, topicID, replyToID, "🛑 已取消")
-		return
-	}
 	if result.Err != nil {
 		d.replyTo(chatID, topicID, replyToID, fmt.Sprintf("❌ 执行失败: %v", result.Err))
 		return
@@ -1132,82 +1025,6 @@ func (d *Dispatcher) sendOutputWithThinking(chatID int64, topicID int, thinkingM
 			d.reply(chatID, topicID, string(chunk))
 		}
 	}
-}
-
-// handleCallback 处理 inline button 回调（目前仅支持 cancel:<jobID>）。
-func (d *Dispatcher) handleCallback(cb *telego.CallbackQuery) {
-	ack := func(text string) {
-		_ = d.botAPI.AnswerCallbackQuery(&telego.AnswerCallbackQueryParams{
-			CallbackQueryID: cb.ID,
-			Text:            text,
-		})
-	}
-	if !strings.HasPrefix(cb.Data, "cancel:") {
-		ack("")
-		return
-	}
-	id, err := strconv.ParseInt(strings.TrimPrefix(cb.Data, "cancel:"), 10, 64)
-	if err != nil {
-		ack("无效 ID")
-		return
-	}
-	d.cancelMu.Lock()
-	e, ok := d.jobMap[id]
-	if ok {
-		delete(d.jobMap, id)
-		e.cancel()
-	}
-	d.cancelMu.Unlock()
-
-	if ok {
-		ack(fmt.Sprintf("🛑 任务 #%d 已取消", id))
-		// 移除按钮，避免重复点击
-		if cb.Message != nil {
-			_, _ = d.botAPI.EditMessageReplyMarkup(&telego.EditMessageReplyMarkupParams{
-				ChatID:    telego.ChatID{ID: cb.Message.GetChat().ID},
-				MessageID: cb.Message.GetMessageID(),
-			})
-		}
-	} else {
-		ack(fmt.Sprintf("任务 #%d 不存在（可能已完成）", id))
-	}
-}
-
-// sendCancelButton 发送带「取消」inline button 的消息，返回发出的消息 ID。
-func (d *Dispatcher) sendCancelButton(chatID int64, topicID int, replyToID int, jobID int64, text string) int {
-	params := &telego.SendMessageParams{
-		ChatID:    telego.ChatID{ID: chatID},
-		Text:      text,
-		ParseMode: telego.ModeMarkdown,
-		ReplyMarkup: &telego.InlineKeyboardMarkup{
-			InlineKeyboard: [][]telego.InlineKeyboardButton{
-				{{Text: "🛑 取消", CallbackData: fmt.Sprintf("cancel:%d", jobID)}},
-			},
-		},
-	}
-	if topicID > 0 {
-		params.MessageThreadID = topicID
-	}
-	if replyToID > 0 {
-		params.ReplyParameters = &telego.ReplyParameters{MessageID: replyToID}
-	}
-	sent, err := d.botAPI.SendMessage(params)
-	if err != nil {
-		slog.Warn("sendCancelButton 失败", "err", err)
-		return 0
-	}
-	return sent.MessageID
-}
-
-// removeInlineKeyboard 移除指定消息的 inline keyboard（任务完成后调用）。
-func (d *Dispatcher) removeInlineKeyboard(chatID int64, msgID int) {
-	if msgID <= 0 {
-		return
-	}
-	_, _ = d.botAPI.EditMessageReplyMarkup(&telego.EditMessageReplyMarkupParams{
-		ChatID:    telego.ChatID{ID: chatID},
-		MessageID: msgID,
-	})
 }
 
 // replyTo 回复指定消息（quote），若 replyToID <= 0 则退化为普通发送。
