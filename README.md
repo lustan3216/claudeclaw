@@ -6,6 +6,9 @@ One binary. Drop it on your server. Talk to Claude from Telegram — anywhere, a
 
 claudeclaw keeps Claude Code running 24/7, routes your messages to it, and pings you back when it's done. Write code, run reports, kick off deploys — all from your phone while you're away from the desk.
 
+> **Multiple Claude Code sessions. Simultaneously. Shared memory.**
+> Create a Telegram group with Topics enabled — each topic is an independent Claude session running in parallel. Review code in one thread, run a deploy in another, debug a bug in a third. All on the same machine, all sharing the same project memory.
+
 ---
 
 ## Prerequisites
@@ -75,11 +78,25 @@ That's it — Claude Code is now reachable over Telegram from anywhere.
 
 ## Key Features
 
-### Telegram Topics → Parallel Conversations
+### Telegram Topics → Multiple Claude Code Sessions in Parallel
 
-Create a Telegram group, enable Topics, and each topic becomes its own independent Claude session. Run a code review in one thread while a deploy runs in another — no waiting in line. When a topic is created, Claude automatically acknowledges with `✓ 已就緒`.
+Each Telegram topic is a fully independent Claude Code session — its own context, its own task queue, running concurrently with all the others. No waiting in line.
 
-> **Tip:** Make the bot a group **admin** so it can read all messages without disabling privacy mode.
+```
+Telegram Group (Topics enabled)
+├── 📌 #code-review     → Claude session A  (reviewing PR #42)
+├── 📌 #deploy          → Claude session B  (running deploy script)
+├── 📌 #bug-fix         → Claude session C  (debugging auth issue)
+└── 📌 #research        → Claude session D  (idle, ready)
+```
+
+All sessions share the same `memory.md` — so context you build in one thread is available in all others. One codebase, one memory, many parallel workers.
+
+**Setup:**
+1. Create a Telegram group
+2. Enable Topics (Group Info → Edit → Topics)
+3. Add your bot as **admin** (required to read messages in topics)
+4. Create a topic — Claude auto-replies `✓ Ready`
 
 ### Message Reactions
 
