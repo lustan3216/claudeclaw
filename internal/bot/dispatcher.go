@@ -982,8 +982,11 @@ func (d *Dispatcher) maybeSummarizeSession(ctx context.Context, chatID int64, to
 
 	interval := d.botCfg.SessionSummarizeInterval
 	maxTokens := d.botCfg.MaxSessionTokens
+	if maxTokens == 0 {
+		maxTokens = 80000 // default: reset when context exceeds 80k tokens
+	}
 
-	tokenTriggered := maxTokens > 0 && inputTokens > 0 && inputTokens >= maxTokens
+	tokenTriggered := inputTokens > 0 && inputTokens >= maxTokens
 	countTriggered := interval > 0 && count%interval == 0
 
 	if !tokenTriggered && !countTriggered {
