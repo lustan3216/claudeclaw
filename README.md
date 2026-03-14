@@ -1,10 +1,10 @@
 # claudeclaw ⚡
 
-**Claude Code on your phone. Tap a message, get work done.**
+**Make your Claude Code like openclaw.**
 
-claudeclaw is a daemon that keeps Claude Code running 24/7 and lets you talk to it over Telegram. Ask it to write code, run reports, check your project status, or kick off a long task while you're away from your desk.
+One binary. Drop it on your server. Talk to Claude from Telegram — anywhere, anytime.
 
-One binary. No Node, no Bun, no runtime to babysit — unless you enable MCP servers (see [Prerequisites](#prerequisites)).
+claudeclaw keeps Claude Code running 24/7, routes your messages to it, and pings you back when it's done. Write code, run reports, kick off deploys — all from your phone while you're away from the desk.
 
 ---
 
