@@ -32,7 +32,7 @@ type Client struct {
 }
 
 // New creates a new Client.
-// Example endpoint: "http://localhost:8080"
+// Example endpoint: "http://localhost:47432"
 func New(endpoint string) *Client {
 	return &Client{
 		endpoint: endpoint,

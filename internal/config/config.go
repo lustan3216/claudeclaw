@@ -248,7 +248,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("web.host", "127.0.0.1")
 	v.SetDefault("web.port", 4632)
 	v.SetDefault("memory.provider", "claude-mem")
-	v.SetDefault("memory.endpoint", "http://localhost:8080")
+	v.SetDefault("memory.endpoint", "http://localhost:47432")
 }
 
 // decode decodes the current viper state into a Config struct and performs basic validation.

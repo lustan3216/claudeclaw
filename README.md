@@ -247,7 +247,7 @@ Schedule prompts with standard cron syntax. Daily reports, weekly summaries, wha
 
   "memory": {
     "provider": "claude-mem",
-    "endpoint": "http://localhost:8080"
+    "endpoint": "http://localhost:47432"
   },
 
   "heartbeat": {
