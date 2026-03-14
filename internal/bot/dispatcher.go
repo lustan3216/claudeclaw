@@ -41,6 +41,19 @@ type cancelEntry struct {
 	topicID int
 }
 
+// pendingJob holds a buffered message waiting to be dispatched.
+type pendingJob struct {
+	replyToID int
+	text      string
+	mode      runner.TaskMode
+}
+
+// topicQueue is the per-topic pending buffer and running state.
+type topicQueue struct {
+	msgs    []pendingJob
+	running bool
+}
+
 // cancelEmojis — users can cancel an in-progress task by reacting with one of these emojis.
 var cancelEmojis = map[string]bool{"😱": true, "😭": true}
 
@@ -65,6 +78,9 @@ type Dispatcher struct {
 	cancelMu       sync.Mutex
 	cancelReactions map[int]cancelEntry // trigger message ID → cancel info (for reaction cancellation)
 
+	pendingMu    sync.Mutex
+	topicPending map[chatTopicKey]*topicQueue
+
 	runnerMgr  *runner.Manager
 	sessionMgr *session.Manager
 	classifier *runner.Classifier
@@ -88,6 +104,7 @@ func NewDispatcher(
 	return &Dispatcher{
 		completionCounts: make(map[chatTopicKey]int),
 		cancelReactions:  make(map[int]cancelEntry),
+		topicPending:     make(map[chatTopicKey]*topicQueue),
 		runnerMgr:        runnerMgr,
 		sessionMgr:       sessionMgr,
 		classifier:       runner.NewClassifier("claude"),
@@ -193,7 +210,7 @@ func (d *Dispatcher) Handle(ctx context.Context, update telego.Update) {
 		text := "[Voice transcription]: " + voiceText
 		go func() {
 			mode := d.classifier.Classify(ctx, text)
-			d.dispatchJob(ctx, msg.Chat.ID, topicID, msg.MessageID, text, mode)
+			d.submitOrQueue(ctx, msg.Chat.ID, topicID, msg.MessageID, text, mode)
 		}()
 		return
 	}
@@ -229,7 +246,7 @@ func (d *Dispatcher) Handle(ctx context.Context, update telego.Update) {
 		}
 		go func() {
 			mode := d.classifier.Classify(ctx, text)
-			d.dispatchJob(ctx, msg.Chat.ID, topicID, msg.MessageID, text, mode)
+			d.submitOrQueue(ctx, msg.Chat.ID, topicID, msg.MessageID, text, mode)
 		}()
 		return
 	}
@@ -263,7 +280,7 @@ func (d *Dispatcher) Handle(ctx context.Context, update telego.Update) {
 		}
 		go func() {
 			mode := d.classifier.Classify(ctx, text)
-			d.dispatchJob(ctx, msg.Chat.ID, topicID, msg.MessageID, text, mode)
+			d.submitOrQueue(ctx, msg.Chat.ID, topicID, msg.MessageID, text, mode)
 		}()
 		return
 	}
@@ -275,7 +292,7 @@ func (d *Dispatcher) Handle(ctx context.Context, update telego.Update) {
 
 	go func() {
 		mode := d.classifier.Classify(ctx, text)
-		d.dispatchJob(ctx, msg.Chat.ID, topicID, msg.MessageID, text, mode)
+		d.submitOrQueue(ctx, msg.Chat.ID, topicID, msg.MessageID, text, mode)
 	}()
 }
 
@@ -413,7 +430,7 @@ func (d *Dispatcher) handleCommand(ctx context.Context, msg *telego.Message, top
 			d.reply(chatID, topicID, "Usage: /bg <task description>")
 			return
 		}
-		d.dispatchJob(ctx, chatID, topicID, msg.MessageID, args, runner.ModeBackground)
+		d.dispatchJob(ctx, chatID, topicID, msg.MessageID, args, runner.ModeBackground, nil)
 	case "usage":
 		d.reply(chatID, topicID, d.buildUsageReport())
 	case "adduser":
@@ -623,9 +640,67 @@ func (d *Dispatcher) buildUsageReport() string {
 	)
 }
 
+// submitOrQueue buffers the message for the given chat+topic.
+// If no job is running, flushes the buffer immediately as a batch.
+// If a job is running, the message waits; runBatch will pick it up when done.
+func (d *Dispatcher) submitOrQueue(ctx context.Context, chatID int64, topicID, replyToID int, text string, mode runner.TaskMode) {
+	key := chatTopicKey{chatID, topicID}
+	d.pendingMu.Lock()
+	tq := d.topicPending[key]
+	if tq == nil {
+		tq = &topicQueue{}
+		d.topicPending[key] = tq
+	}
+	tq.msgs = append(tq.msgs, pendingJob{replyToID, text, mode})
+	if tq.running {
+		d.pendingMu.Unlock()
+		return
+	}
+	tq.running = true
+	batch := tq.msgs
+	tq.msgs = nil
+	d.pendingMu.Unlock()
+	go d.runBatch(ctx, chatID, topicID, batch)
+}
+
+// runBatch dispatches a batch of pending messages as a single combined job.
+// When done, checks for more pending messages and continues if any.
+func (d *Dispatcher) runBatch(ctx context.Context, chatID int64, topicID int, batch []pendingJob) {
+	key := chatTopicKey{chatID, topicID}
+
+	// React 👀 on all messages except the last (dispatchJob handles the last one)
+	for i := 0; i < len(batch)-1; i++ {
+		d.react(chatID, batch[i].replyToID, "👀")
+	}
+
+	// Combine all texts; use last message's replyToID and mode
+	var texts []string
+	for _, j := range batch {
+		texts = append(texts, j.text)
+	}
+	last := batch[len(batch)-1]
+
+	d.dispatchJob(ctx, chatID, topicID, last.replyToID, strings.Join(texts, "\n"), last.mode, func() {
+		d.pendingMu.Lock()
+		tq := d.topicPending[key]
+		if tq == nil || len(tq.msgs) == 0 {
+			if tq != nil {
+				tq.running = false
+			}
+			d.pendingMu.Unlock()
+			return
+		}
+		next := tq.msgs
+		tq.msgs = nil
+		d.pendingMu.Unlock()
+		go d.runBatch(ctx, chatID, topicID, next)
+	})
+}
+
 // dispatchJob submits a job to the runner and handles Telegram replies.
 // replyToID is the ID of the last message that triggered this job; it is quoted in the reply.
-func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int, replyToID int, prompt string, mode runner.TaskMode) {
+// onDone is called when the job completes (all paths); pass nil if not needed.
+func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int, replyToID int, prompt string, mode runner.TaskMode, onDone func()) {
 	// React with 👀 on receipt
 	d.react(chatID, replyToID, "👀")
 
@@ -659,6 +734,9 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 
 		go func() {
 			defer cleanup()
+			if onDone != nil {
+				defer onDone()
+			}
 			result := <-resultCh
 			if result.Err != nil {
 				if jobCtx.Err() != nil {
@@ -673,6 +751,11 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 			d.maybeSummarizeSession(ctx, chatID, topicID, result.InputTokens)
 		}()
 		return
+	}
+
+	// Foreground: call onDone when this function returns (all paths)
+	if onDone != nil {
+		defer onDone()
 	}
 
 	// Foreground job: keep sending typing action until complete, then reply with result
