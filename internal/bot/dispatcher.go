@@ -876,16 +876,18 @@ func (d *Dispatcher) maybeUpdateMemory(ctx context.Context, chatID int64, topicI
 
 	slog.Info("triggering memory update", "chat_id", chatID, "topic_id", topicID, "count", count)
 
-	prompt := "Based on the conversation above, silently update the .claudeclaw/memory.md file in the working directory.\n" +
-		"Use section markers in the file format, with each section containing bilingual (Chinese and English) tags for relevance matching:\n\n" +
-		"<!-- section: global tags: always -->\n" +
-		"## Global Preferences\n" +
-		"(User preferences, language settings, etc. — injected every time)\n\n" +
-		"<!-- section: project-name tags: english-tag,chinese-tag,alias,... -->\n" +
-		"## Project Name\n" +
-		"(Project-related knowledge)\n\n" +
-		"Tag rules: include both English and Chinese for the same concept, e.g. 'hn,lottery'.\n" +
-		"Keep each section concise, under 300 words. Do not reply with any other content."
+	prompt := "Based on the conversation above, do two things silently:\n\n" +
+		"1. Update .claudeclaw/memory.md — use section markers with relevance tags:\n" +
+		"   <!-- section: global tags: always -->\n" +
+		"   ## Global Preferences\n" +
+		"   (keep under 200 words total for global section)\n\n" +
+		"   <!-- section: topic tags: tag1,tag2 -->\n" +
+		"   ## Topic\n" +
+		"   (keep each section under 200 words)\n\n" +
+		"2. Check for behavioral patterns: if you've noticed a consistent preference or habit in this conversation " +
+		"that isn't already in .claudeclaw/preferences.md, add ONE short rule (1 sentence max) to .claudeclaw/preferences.md. " +
+		"Only add if you're confident — skip if uncertain. The preferences file is for permanent behavior rules, not facts.\n\n" +
+		"Do not reply after completing."
 
 	resultCh := make(chan runner.Result, 1)
 	d.runnerMgr.Submit(runner.Job{
@@ -929,9 +931,12 @@ func (d *Dispatcher) maybeCompressMemory(ctx context.Context, chatID int64, topi
 
 	slog.Info("triggering memory.md compression", "count", count)
 
-	prompt := "Please read .claudeclaw/memory.md in the working directory, " +
-		"remove duplicate content, merge similar entries, delete outdated information, and rewrite it as concise Markdown. " +
-		"Overwrite the original file directly. Do not reply with any other content."
+	prompt := "Compress .claudeclaw/memory.md in the working directory:\n" +
+		"1. Keep the file under 3000 bytes total.\n" +
+		"2. Remove duplicates, merge similar entries, delete outdated facts.\n" +
+		"3. If the file is still over 3000 bytes after deduplication, move the oldest or least-relevant non-global sections to .claudeclaw/vault/" + currentYearMonth() + ".md (append).\n" +
+		"4. Overwrite memory.md with the trimmed result.\n" +
+		"Do not reply after completing."
 
 	resultCh := make(chan runner.Result, 1)
 	d.runnerMgr.Submit(runner.Job{
@@ -974,9 +979,16 @@ func (d *Dispatcher) maybeSummarizeSession(ctx context.Context, chatID int64, to
 
 	slog.Info("triggering conversation summarize and session reset", "chat_id", chatID, "topic_id", topicID, "count", count)
 
-	prompt := "Please summarize the full conversation above " +
-		"and update the '## Conversation Summary' section of .claudeclaw/memory.md in the working directory, " +
-		"preserving important decisions, user preferences, and key context. Do not reply with any other content after completing this."
+	prompt := "Write a structured session brief to .claudeclaw/memory.md.\n" +
+		"1. Find the current '## Session Brief' section (tagged 'session-brief'). If it exists, FIRST append its content to .claudeclaw/vault/" + currentYearMonth() + ".md (creating the file if needed, appending if it already exists).\n" +
+		"2. Replace the section with a new brief in this exact format (under 150 words total):\n\n" +
+		"<!-- section: session-brief tags: always -->\n" +
+		"## Session Brief\n" +
+		"**Date:** " + time.Now().UTC().Format("2006-01-02") + "\n" +
+		"**Done:** (one line — what was completed today)\n" +
+		"**Decided:** (one line — key decisions made)\n" +
+		"**Pending:** (one line — open items)\n\n" +
+		"Do not reply after completing."
 
 	resultCh := make(chan runner.Result, 1)
 	d.runnerMgr.Submit(runner.Job{
@@ -1335,6 +1347,11 @@ func (d *Dispatcher) saveRestartNotify(chatID int64, topicID int) {
 	})
 	_ = os.MkdirAll(filepath.Join(d.workspace, ".claudeclaw"), 0o755)
 	_ = os.WriteFile(d.restartNotifyPath(), data, 0o644)
+}
+
+// currentYearMonth returns the current UTC year-month string for vault file naming.
+func currentYearMonth() string {
+	return time.Now().UTC().Format("2006-01")
 }
 
 // combineMessages merges multiple messages into one, joined in chronological order.

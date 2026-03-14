@@ -9,8 +9,10 @@ import (
 )
 
 const (
-	localMemoryFile = ".claudeclaw/memory.md"
-	maxMemoryBytes  = 2000 // limit injection size to avoid wasting tokens
+	localMemoryFile      = ".claudeclaw/memory.md"
+	localPreferencesFile = ".claudeclaw/preferences.md"
+	maxMemoryBytes       = 2000 // limit injection size to avoid wasting tokens
+	maxPrefsBytes        = 800  // preferences are behavioral rules; keep compact
 )
 
 // LocalMemory manages the local memory file for a workspace.
@@ -36,6 +38,24 @@ func (m *LocalMemory) Load() (string, error) {
 	content := strings.TrimSpace(string(data))
 	if len(content) > maxMemoryBytes {
 		content = content[:maxMemoryBytes] + "\n...(truncated)"
+	}
+	return content, nil
+}
+
+// LoadPreferences reads the preferences file contents. Returns an empty string if the file doesn't exist (not an error).
+// The preferences file holds behavioral rules Claude proposes for itself across sessions.
+func (m *LocalMemory) LoadPreferences() (string, error) {
+	path := filepath.Join(m.workspace, localPreferencesFile)
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("failed to read preferences file: %w", err)
+	}
+	content := strings.TrimSpace(string(data))
+	if len(content) > maxPrefsBytes {
+		content = content[:maxPrefsBytes] + "\n...(truncated)"
 	}
 	return content, nil
 }

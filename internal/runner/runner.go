@@ -142,6 +142,14 @@ func (m *Manager) execute(job Job) Result {
 			prompt = memory.InjectPrefix(memContent, prompt)
 			slog.Debug("relevant memory injected", "memory_len", len(memContent))
 		}
+
+		// 注入 preferences.md（Claude 为自己提议的行为规则）
+		if prefsContent, err := localMem.LoadPreferences(); err != nil {
+			slog.Warn("failed to read preferences, skipping", "err", err)
+		} else if prefsContent != "" {
+			prompt = memory.InjectPrefix(prefsContent, prompt)
+			slog.Debug("preferences injected", "prefs_len", len(prefsContent))
+		}
 	}
 	job.Prompt = prompt
 
