@@ -340,7 +340,8 @@ func (d *Dispatcher) handleCommand(ctx context.Context, msg *telego.Message, top
 				"`/usage`          今日 token 用量统计\n"+
 				"😱 或 😭           对正在处理的消息打此 reaction 可取消任务\n\n"+
 				"*🔄 更新*\n"+
-				"`/update`         立即重启并拉取最新版本\n\n"+
+				"`/update`                      立即重启并拉取最新版本\n"+
+				"`/set auto_update false`  关闭每次消息时的后台自动检查更新\n\n"+
 				"*⚙️ MCP 配置*\n"+
 				"`/config`                    查看所有设置（token 脱敏）\n"+
 				"`/set <key> <value>`  更新配置，立即生效并重置 session\n"+
