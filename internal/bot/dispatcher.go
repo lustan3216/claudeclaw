@@ -344,40 +344,13 @@ func (d *Dispatcher) handleCommand(ctx context.Context, msg *telego.Message, top
 	case "start", "help":
 		d.reply(chatID, topicID, fmt.Sprintf(
 			"⚡ *claudeclaw* `%s`\n\n"+
-				"*💬 Chat*\n"+
-				"Send any message to talk to Claude\n"+
-				"`/clear`          Clear session and reload MCP\n"+
-				"`/bg <task>`      Force background mode for long tasks\n"+
-				"`/status`         Show runtime status\n"+
-				"`/usage`          Today's token usage stats\n"+
-				"😱 or 😭           React to a message being processed to cancel the task\n\n"+
-				"*👥 Access*\n"+
-				"`/adduser <id>`   Add a user by their Telegram ID\n\n"+
-				"*🔄 Updates*\n"+
-				"`/update`                      Restart and pull latest version\n"+
-				"`/set auto_update false`  Disable background auto-update check on each message\n\n"+
-				"*⚙️ MCP Config*\n"+
-				"`/config`                    View all settings (tokens masked)\n"+
-				"`/set <key> <value>`  Update config, takes effect immediately and resets session\n"+
-				"`/unset <key>`          Clear a config value\n\n"+
-				"*🔑 Settable Keys*\n"+
-				"```\n"+
-				"github_token     GitHub Personal Access Token\n"+
-				"notion_token     Notion Integration Token\n"+
-				"brave_key        Brave Search API Key\n"+
-				"browser          Browser MCP        true/false\n"+
-				"gemini           Gemini MCP         true/false\n"+
-				"auto_update      Auto-update        true/false\n"+
-				"security_level   locked/strict/moderate/unrestricted\n"+
-				"```\n\n"+
-				"*📝 Examples*\n"+
-				"```\n"+
-				"/set notion_token secret_xxx\n"+
-				"/set gemini true\n"+
-				"/set security_level strict\n"+
-				"/set auto_update false\n"+
-				"/unset brave_key\n"+
-				"```",
+				"/clear · /bg `<task>` · /status · /usage\n"+
+				"/adduser `<id>` · /update · /config\n"+
+				"😱 😭 react to cancel\n\n"+
+				"*Config keys*\n"+
+				"`github_token` `notion_token` `brave_key`\n"+
+				"`browser` `gemini` `auto_update` `security_level`\n\n"+
+				"`/set <key> <value>` · `/unset <key>`",
 			buildinfo.Version,
 		))
 	case "config":
