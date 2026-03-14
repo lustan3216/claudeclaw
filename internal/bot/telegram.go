@@ -126,6 +126,7 @@ func (b *Bot) sendRestartNotification() {
 
 // Run starts the long-polling loop, blocking until ctx is cancelled.
 // Should be called in its own goroutine.
+// Automatically reconnects if the polling connection drops (e.g. 409 Conflict on restart).
 func (b *Bot) Run(ctx context.Context) {
 	slog.Info("starting bot long polling", "bot", b.cfg.Name)
 
@@ -135,6 +136,29 @@ func (b *Bot) Run(ctx context.Context) {
 		b.sendRestartNotification()
 	}()
 
+	for {
+		if err := b.runPollingOnce(ctx); err != nil {
+			slog.Error("long polling failed", "bot", b.cfg.Name, "err", err)
+		}
+
+		select {
+		case <-ctx.Done():
+			slog.Info("bot stopped", "bot", b.cfg.Name)
+			return
+		default:
+			// Polling exited unexpectedly (e.g. 409 Conflict on restart) — wait and reconnect
+			slog.Warn("polling exited, reconnecting in 5s", "bot", b.cfg.Name)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+			}
+		}
+	}
+}
+
+// runPollingOnce runs one polling session until the channel closes or ctx is cancelled.
+func (b *Bot) runPollingOnce(ctx context.Context) error {
 	updates, err := b.api.UpdatesViaLongPolling(
 		// Explicitly include message_reaction (not included by default, must be declared)
 		(&telego.GetUpdatesParams{}).WithAllowedUpdates("message", "message_reaction"),
@@ -142,26 +166,22 @@ func (b *Bot) Run(ctx context.Context) {
 		telego.WithLongPollingRetryTimeout(3*time.Second),
 	)
 	if err != nil {
-		slog.Error("failed to start long polling", "bot", b.cfg.Name, "err", err)
-		return
+		return err
 	}
 	defer b.api.StopLongPolling()
 
 	for {
 		select {
 		case <-ctx.Done():
-			slog.Info("bot received stop signal, exiting long polling", "bot", b.cfg.Name)
-			return
+			return nil
 
 		case update, ok := <-updates:
 			if !ok {
 				// channel closed (ctx cancelled or connection dropped)
-				slog.Warn("update channel closed, bot exiting", "bot", b.cfg.Name)
-				return
+				return nil
 			}
 
 			// Process in independent goroutine to prevent slow message handling from blocking polling
-			// Note: dispatcher has debouncing and serial queues internally — no concurrency conflicts
 			go b.dispatcher.Handle(ctx, update)
 		}
 	}
