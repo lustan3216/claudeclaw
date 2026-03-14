@@ -74,7 +74,7 @@ type Dispatcher struct {
 	debounce map[chatTopicKey]*debounceState // chat+topic → debounce state
 
 	countsMu         sync.Mutex
-	completionCounts map[chatTopicKey]int // chat+topic → successful completion count (triggers memory update/summarize)
+	completionCounts map[chatTopicKey]int // chat+topic → successful completion count (triggers memory update)
 	memUpdateCount   int                  // global memory update count (triggers memory.md compression)
 
 	autoUpdateMu      sync.Mutex
@@ -968,38 +968,24 @@ func (d *Dispatcher) maybeCompressMemory(ctx context.Context, chatID int64, topi
 	}()
 }
 
-// maybeSummarizeSession summarizes the conversation into memory.md and resets the session.
-// Triggers on two conditions (whichever comes first):
-//   - every N completions (SessionSummarizeInterval)
-//   - when input tokens exceed max_session_tokens threshold
-//
-// The next conversation starts from a fresh session, but continuity is maintained via memory.md injection.
+// maybeSummarizeSession summarizes the conversation into memory.md and resets the session
+// when input tokens exceed max_session_tokens (default 60000).
+// The next conversation starts from a fresh session; continuity is maintained via memory.md injection.
 func (d *Dispatcher) maybeSummarizeSession(ctx context.Context, chatID int64, topicID int, inputTokens int) {
-	key := chatTopicKey{chatID, topicID}
-	d.countsMu.Lock()
-	count := d.completionCounts[key]
-	d.countsMu.Unlock()
-
-	interval := d.botCfg.SessionSummarizeInterval
+	if inputTokens <= 0 {
+		return
+	}
 	maxTokens := d.botCfg.MaxSessionTokens
 	if maxTokens == 0 {
-		maxTokens = 60000 // default: reset when context exceeds 60k tokens
+		maxTokens = 60000
 	}
-
-	tokenTriggered := inputTokens > 0 && inputTokens >= maxTokens
-	countTriggered := interval > 0 && count%interval == 0
-
-	if !tokenTriggered && !countTriggered {
+	if inputTokens < maxTokens {
 		return
 	}
 
-	if tokenTriggered {
-		slog.Info("session token threshold exceeded, triggering early summarize+reset",
-			"input_tokens", inputTokens, "max_session_tokens", maxTokens,
-			"chat_id", chatID, "topic_id", topicID)
-	}
-
-	slog.Info("triggering conversation summarize and session reset", "chat_id", chatID, "topic_id", topicID, "count", count)
+	slog.Info("session token threshold exceeded, triggering summarize+reset",
+		"input_tokens", inputTokens, "max_session_tokens", maxTokens,
+		"chat_id", chatID, "topic_id", topicID)
 
 	prompt := "Write a structured session brief to .claudeclaw/memory.md.\n" +
 		"1. Find the current '## Session Brief' section (tagged 'session-brief'). If it exists, FIRST append its content to .claudeclaw/vault/" + currentYearMonth() + ".md (creating the file if needed, appending if it already exists).\n" +

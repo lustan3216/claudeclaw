@@ -20,10 +20,9 @@ type BotConfig struct {
 	AllowedUsers        []int64 `mapstructure:"allowed_users"`
 	DebounceMs          int     `mapstructure:"debounce_ms"`
 	OpenAIAPIKey        string  `mapstructure:"openai_api_key"`        // Whisper voice transcription; reads OPENAI_API_KEY env var if empty
-	MemoryUpdateInterval      int `mapstructure:"memory_update_interval"`      // update memory.md every N successful completions; 0 = disabled
-	SessionSummarizeInterval  int `mapstructure:"session_summarize_interval"`  // summarize conversation and reset session every N completions; 0 = disabled
-	MemoryCompressInterval    int `mapstructure:"memory_compress_interval"`    // compress memory.md every N memory updates; 0 = disabled
-	MaxSessionTokens          int `mapstructure:"max_session_tokens"`          // force summarize+reset when input tokens exceed this; 0 = disabled (recommended: 80000)
+	MemoryUpdateInterval   int `mapstructure:"memory_update_interval"`   // update memory.md every N successful completions; 0 = disabled
+	MemoryCompressInterval int `mapstructure:"memory_compress_interval"` // compress memory.md every N memory updates; 0 = disabled
+	MaxSessionTokens       int `mapstructure:"max_session_tokens"`       // reset session when input tokens exceed this; default 60000
 }
 
 // MCPsConfig holds preset MCP server configs; leaving token empty disables that server.
