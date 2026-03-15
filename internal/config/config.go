@@ -24,40 +24,6 @@ type BotConfig struct {
 	MaxSessionTokens       int `mapstructure:"max_session_tokens"`       // reset session when input tokens exceed this; default 60000
 }
 
-// MCPsConfig holds preset MCP server configs; leaving token empty disables that server.
-type MCPsConfig struct {
-	GitHub  MCPGitHubConfig  `mapstructure:"github"`
-	Notion  MCPNotionConfig  `mapstructure:"notion"`
-	Browser MCPBrowserConfig `mapstructure:"browser"`
-	Brave   MCPBraveConfig   `mapstructure:"brave"`
-	Gemini  MCPGeminiConfig  `mapstructure:"gemini"`
-}
-
-// MCPGitHubConfig is the GitHub MCP server (@modelcontextprotocol/server-github).
-type MCPGitHubConfig struct {
-	Token string `mapstructure:"token"` // GitHub personal access token; empty = disabled
-}
-
-// MCPNotionConfig is the Notion MCP server (@notionhq/notion-mcp-server).
-type MCPNotionConfig struct {
-	Token string `mapstructure:"token"` // Notion integration token; empty = disabled
-}
-
-// MCPBrowserConfig is the browser automation MCP (@modelcontextprotocol/server-puppeteer).
-type MCPBrowserConfig struct {
-	Enabled bool `mapstructure:"enabled"` // true = enabled, no token required
-}
-
-// MCPBraveConfig is the Brave Search MCP (@modelcontextprotocol/server-brave-search).
-type MCPBraveConfig struct {
-	APIKey string `mapstructure:"api_key"` // Brave Search API key; empty = disabled
-}
-
-// MCPGeminiConfig is the Gemini MCP (gemini-mcp-tool); no token required, relies on local Gemini CLI auth.
-type MCPGeminiConfig struct {
-	Enabled bool `mapstructure:"enabled"` // true = enabled, requires local gemini auth to be completed
-}
-
 // QuietWindow defines a heartbeat quiet period (local time).
 type QuietWindow struct {
 	Start string `mapstructure:"start"` // "23:00"
@@ -109,7 +75,6 @@ type Config struct {
 	Security   SecurityConfig  `mapstructure:"security"`
 	Web        WebConfig       `mapstructure:"web"`
 	CronJobs   []CronJob       `mapstructure:"cron_jobs"`
-	MCPs       MCPsConfig      `mapstructure:"mcps"`
 }
 
 // Manager holds the current config and supports hot-reloading.
@@ -189,11 +154,6 @@ func (m *Manager) OnChange(fn func(newCfg *Config)) {
 // keyAliases maps user-friendly short names to viper config paths.
 // Used by Telegram /set /unset /config commands.
 var keyAliases = map[string]string{
-	"github_token":   "mcps.github.token",
-	"notion_token":   "mcps.notion.token",
-	"brave_key":      "mcps.brave.api_key",
-	"browser":        "mcps.browser.enabled",
-	"gemini":         "mcps.gemini.enabled",
 	"auto_update":    "auto_update",
 	"security_level": "security.level",
 }

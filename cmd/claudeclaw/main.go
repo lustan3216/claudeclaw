@@ -22,7 +22,6 @@ import (
 	"github.com/lustan3216/claudeclaw/internal/buildinfo"
 	"github.com/lustan3216/claudeclaw/internal/config"
 	"github.com/lustan3216/claudeclaw/internal/daemon"
-	"github.com/lustan3216/claudeclaw/internal/mcp"
 	"github.com/lustan3216/claudeclaw/internal/runner"
 	"github.com/lustan3216/claudeclaw/internal/scheduler"
 	"github.com/lustan3216/claudeclaw/internal/session"
@@ -108,11 +107,8 @@ func run(flags *cliFlags) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// ── 4. MCP config generation ─────────────────────────────────────────
+	// ── 4. Resolve workspace ─────────────────────────────────────────
 	workspace := resolvePath(cfg.Workspace)
-	if err := mcp.ApplyConfig(workspace, cfg.MCPs); err != nil {
-		slog.Warn("MCP config generation failed, skipping", "err", err)
-	}
 
 	// ── 6. Session Manager ──────────────────────────────────────────
 	sessionMgr := session.New()
@@ -147,10 +143,6 @@ func run(flags *cliFlags) error {
 		botMgr.UpdateConfig(newCfg)
 		if err := cronSched.LoadJobs(ctx, newCfg.CronJobs); err != nil {
 			slog.Error("failed to hot-reload cron jobs", "err", err)
-		}
-		// Regenerate .mcp.json when MCP config changes
-		if err := mcp.ApplyConfig(workspace, newCfg.MCPs); err != nil {
-			slog.Warn("failed to hot-reload MCP config", "err", err)
 		}
 	})
 
