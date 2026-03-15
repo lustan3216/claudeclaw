@@ -700,14 +700,15 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 
 		resultCh := make(chan runner.Result, 1)
 		d.runnerMgr.Submit(runner.Job{
-			Ctx:       jobCtx,
-			Workspace: d.workspace,
-			BotName:   d.botCfg.Name,
-			ChatID:    chatID,
-			TopicID:   topicID,
-			Prompt:    prompt,
-			Mode:      mode,
-			ResultCh:  resultCh,
+			Ctx:              jobCtx,
+			Workspace:        d.workspace,
+			BotName:          d.botCfg.Name,
+			ChatID:           chatID,
+			TopicID:          topicID,
+			Prompt:           prompt,
+			Mode:             mode,
+			AnthropicAPIKeys: d.botCfg.AnthropicAPIKeys,
+			ResultCh:         resultCh,
 		})
 
 		go func() {
@@ -857,9 +858,10 @@ func (d *Dispatcher) maybeUpdateMemory(ctx context.Context, chatID int64, topicI
 		BotName:   d.botCfg.Name,
 		ChatID:    chatID,
 		TopicID:   topicID,
-		Prompt:    prompt,
-		Mode:      runner.ModeForeground,
-		ResultCh:  resultCh,
+		Prompt:           prompt,
+		Mode:             runner.ModeForeground,
+		AnthropicAPIKeys: d.botCfg.AnthropicAPIKeys,
+		ResultCh:         resultCh,
 	})
 
 	// Discard result, log only; on success check if memory.md needs compression
@@ -906,9 +908,10 @@ func (d *Dispatcher) maybeCompressMemory(ctx context.Context, chatID int64, topi
 		BotName:   d.botCfg.Name,
 		ChatID:    chatID,
 		TopicID:   topicID,
-		Prompt:    prompt,
-		Mode:      runner.ModeForeground,
-		ResultCh:  resultCh,
+		Prompt:           prompt,
+		Mode:             runner.ModeForeground,
+		AnthropicAPIKeys: d.botCfg.AnthropicAPIKeys,
+		ResultCh:         resultCh,
 	})
 
 	go func() {
@@ -958,9 +961,10 @@ func (d *Dispatcher) maybeSummarizeSession(ctx context.Context, chatID int64, to
 		BotName:   d.botCfg.Name,
 		ChatID:    chatID,
 		TopicID:   topicID,
-		Prompt:    prompt,
-		Mode:      runner.ModeForeground,
-		ResultCh:  resultCh,
+		Prompt:           prompt,
+		Mode:             runner.ModeForeground,
+		AnthropicAPIKeys: d.botCfg.AnthropicAPIKeys,
+		ResultCh:         resultCh,
 	})
 
 	go func() {

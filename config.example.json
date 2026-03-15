@@ -5,7 +5,8 @@
       "name": "main",
       "token": "TOKEN_1",
       "allowed_users": [123456789],
-      "openai_api_key": ""
+      "openai_api_key": "",
+      "anthropic_api_keys": ["sk-ant-key1", "sk-ant-key2"]
     },
     {
       "name": "work",

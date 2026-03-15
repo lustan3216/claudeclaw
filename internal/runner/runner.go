@@ -36,14 +36,15 @@ type Result struct {
 
 // Job is the unit of work submitted to the serial queue.
 type Job struct {
-	Ctx       context.Context
-	Workspace string
-	BotName   string // bot name, used as session key
-	ChatID    int64  // Telegram chat ID
-	TopicID   int    // Telegram topic ID (forum thread); 0 means regular chat
-	Prompt    string
-	Mode      TaskMode
-	ResultCh  chan<- Result // caller listens on this channel for the result
+	Ctx             context.Context
+	Workspace       string
+	BotName         string   // bot name, used as session key
+	ChatID          int64    // Telegram chat ID
+	TopicID         int      // Telegram topic ID (forum thread); 0 means regular chat
+	Prompt          string
+	Mode            TaskMode
+	AnthropicAPIKeys []string // API keys to try in order; falls back to env ANTHROPIC_API_KEY if empty
+	ResultCh        chan<- Result // caller listens on this channel for the result
 }
 
 // claudeJSONOutput is the output structure of claude --output-format json.
@@ -141,10 +142,34 @@ func (m *Manager) runQueue(key queueKey, q <-chan Job) {
 	}
 }
 
+// rateLimitPhrases are substrings in stderr/stdout that indicate a key-related failure
+// worth retrying with a different API key.
+var rateLimitPhrases = []string{
+	"rate_limit_error",
+	"overloaded_error",
+	"insufficient_credits",
+	"credit_balance",
+	"authentication_error",
+	"invalid_api_key",
+	"permission_error",
+}
+
+// isKeyError returns true if the output looks like a rate-limit, quota, or auth failure.
+func isKeyError(output string) bool {
+	lower := strings.ToLower(output)
+	for _, phrase := range rateLimitPhrases {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
 // execute actually runs the claude CLI and returns the output.
 // Logic:
 //   - Known session → --output-format text --resume {sessionID}
 //   - No session (new) → --output-format json, parse session_id from JSON output and persist
+//   - If AnthropicAPIKeys is set, retries with the next key on rate-limit / quota / auth failures.
 func (m *Manager) execute(job Job) Result {
 	sessionID := m.sessions.Get(job.Workspace, job.BotName, job.ChatID, job.TopicID)
 	isNewSession := sessionID == ""
@@ -176,6 +201,32 @@ func (m *Manager) execute(job Job) Result {
 	}
 	job.Prompt = prompt
 
+	// Determine which keys to try. If no keys configured, pass empty string (use env var as-is).
+	keys := job.AnthropicAPIKeys
+	if len(keys) == 0 {
+		keys = []string{""}
+	}
+
+	var lastResult Result
+	for i, key := range keys {
+		lastResult = m.executeWithKey(job, sessionID, isNewSession, key)
+		if lastResult.Err == nil {
+			return lastResult
+		}
+		// Only retry on key-related errors, and only if there are more keys to try
+		if i < len(keys)-1 && isKeyError(lastResult.Output+lastResult.Err.Error()) {
+			slog.Warn("key error detected, retrying with next key",
+				"key_index", i, "err", lastResult.Err,
+				"workspace", job.Workspace, "chat_id", job.ChatID)
+			continue
+		}
+		break
+	}
+	return lastResult
+}
+
+// executeWithKey runs the claude CLI with a specific API key (empty = use env var).
+func (m *Manager) executeWithKey(job Job, sessionID string, isNewSession bool, apiKey string) Result {
 	args := m.buildArgs(job, sessionID)
 
 	slog.Info("executing claude",
@@ -185,13 +236,12 @@ func (m *Manager) execute(job Job) Result {
 		"topic_id", job.TopicID,
 		"mode", job.Mode,
 		"session_id", sessionID,
-		"new_session", isNewSession)
+		"new_session", isNewSession,
+		"has_key_override", apiKey != "")
 
 	cmd := exec.CommandContext(job.Ctx, m.claudePath, args...)
 	cmd.Dir = job.Workspace
-
-	// Filter CLAUDECODE env vars to prevent claude from refusing nested launches
-	cmd.Env = filteredEnv()
+	cmd.Env = filteredEnv(apiKey)
 
 	// Stream output
 	stdout, err := cmd.StdoutPipe()
@@ -208,7 +258,7 @@ func (m *Manager) execute(job Job) Result {
 	}
 
 	// Concurrently read stdout and stderr
-	var outputBuilder strings.Builder
+	var outputBuilder, stderrBuilder strings.Builder
 	var wg sync.WaitGroup
 
 	wg.Add(2)
@@ -225,7 +275,10 @@ func (m *Manager) execute(job Job) Result {
 		defer wg.Done()
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
-			slog.Debug("claude stderr", "line", scanner.Text(), "workspace", job.Workspace)
+			line := scanner.Text()
+			slog.Debug("claude stderr", "line", line, "workspace", job.Workspace)
+			stderrBuilder.WriteString(line)
+			stderrBuilder.WriteByte('\n')
 		}
 	}()
 
@@ -235,8 +288,9 @@ func (m *Manager) execute(job Job) Result {
 		if job.Ctx.Err() != nil {
 			return Result{Err: fmt.Errorf("job cancelled: %w", job.Ctx.Err())}
 		}
+		combinedOutput := outputBuilder.String() + stderrBuilder.String()
 		return Result{
-			Output: outputBuilder.String(),
+			Output: combinedOutput,
 			Err:    fmt.Errorf("claude exited with error: %w", err),
 		}
 	}

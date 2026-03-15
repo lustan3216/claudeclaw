@@ -15,10 +15,11 @@ import (
 
 // BotConfig holds configuration for a single Telegram Bot.
 type BotConfig struct {
-	Name                string  `mapstructure:"name"`
-	Token               string  `mapstructure:"token"`
-	AllowedUsers  []int64 `mapstructure:"allowed_users"`
-	OpenAIAPIKey  string  `mapstructure:"openai_api_key"` // Whisper voice transcription; reads OPENAI_API_KEY env var if empty
+	Name                string   `mapstructure:"name"`
+	Token               string   `mapstructure:"token"`
+	AllowedUsers        []int64  `mapstructure:"allowed_users"`
+	OpenAIAPIKey        string   `mapstructure:"openai_api_key"`        // Whisper voice transcription; reads OPENAI_API_KEY env var if empty
+	AnthropicAPIKeys    []string `mapstructure:"anthropic_api_keys"`    // multiple keys tried in order; fallback on rate-limit/quota/auth errors
 	MemoryUpdateInterval   int `mapstructure:"memory_update_interval"`   // update memory.md every N successful completions; 0 = disabled
 	MemoryCompressInterval int `mapstructure:"memory_compress_interval"` // compress memory.md every N memory updates; 0 = disabled
 	MaxSessionTokens       int `mapstructure:"max_session_tokens"`       // reset session when input tokens exceed this; default 60000
