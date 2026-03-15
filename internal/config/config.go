@@ -75,12 +75,6 @@ type HeartbeatConfig struct {
 	TopicID         int           `mapstructure:"topic_id"`  // send to forum topic (0 = regular chat)
 }
 
-// MemoryConfig holds claude-mem / mem0 integration configuration.
-type MemoryConfig struct {
-	Provider string `mapstructure:"provider"` // "claude-mem" | "mem0"
-	Endpoint string `mapstructure:"endpoint"`
-}
-
 // SecurityConfig holds claude execution permission level.
 type SecurityConfig struct {
 	// Level options: locked | strict | moderate | unrestricted
@@ -111,7 +105,6 @@ type Config struct {
 	Workspace  string          `mapstructure:"workspace"`
 	AutoUpdate bool            `mapstructure:"auto_update"` // true = run.sh watchdog auto git pull + rebuild before each restart
 	Bots       []BotConfig     `mapstructure:"bots"`
-	Memory     MemoryConfig    `mapstructure:"memory"`
 	Heartbeat  HeartbeatConfig `mapstructure:"heartbeat"`
 	Security   SecurityConfig  `mapstructure:"security"`
 	Web        WebConfig       `mapstructure:"web"`
@@ -338,8 +331,6 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("web.enabled", false)
 	v.SetDefault("web.host", "127.0.0.1")
 	v.SetDefault("web.port", 4632)
-	v.SetDefault("memory.provider", "claude-mem")
-	v.SetDefault("memory.endpoint", "http://localhost:47432")
 }
 
 // decode decodes the current viper state into a Config struct and performs basic validation.

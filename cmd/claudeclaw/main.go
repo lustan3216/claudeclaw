@@ -2,12 +2,11 @@
 //
 // Key features:
 //   - Multi-bot support (each bot runs in its own goroutine)
-//   - Message debouncing with automatic foreground/background task classification
+//   - Message merge-on-idle with automatic foreground/background task classification
 //   - Per-workspace serial execution queue
 //   - Heartbeat scheduling with quiet windows
 //   - Cron job scheduling
 //   - Hot config reload (fsnotify)
-//   - claude-mem shared memory integration
 package main
 
 import (
@@ -24,7 +23,6 @@ import (
 	"github.com/lustan3216/claudeclaw/internal/config"
 	"github.com/lustan3216/claudeclaw/internal/daemon"
 	"github.com/lustan3216/claudeclaw/internal/mcp"
-	"github.com/lustan3216/claudeclaw/internal/memory"
 	"github.com/lustan3216/claudeclaw/internal/runner"
 	"github.com/lustan3216/claudeclaw/internal/scheduler"
 	"github.com/lustan3216/claudeclaw/internal/session"
@@ -110,16 +108,7 @@ func run(flags *cliFlags) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// ── 4. claude-mem health check ──────────────────────────────────────────
-	memClient := memory.New(cfg.Memory.Endpoint)
-	if err := memClient.Health(ctx); err != nil {
-		// Warn only when memory service is unavailable — don't block startup
-		slog.Warn("claude-mem service unreachable, memory features will be unavailable", "err", err)
-	} else {
-		slog.Info("claude-mem connected", "endpoint", cfg.Memory.Endpoint)
-	}
-
-	// ── 5. MCP config generation ─────────────────────────────────────────
+	// ── 4. MCP config generation ─────────────────────────────────────────
 	workspace := resolvePath(cfg.Workspace)
 	if err := mcp.ApplyConfig(workspace, cfg.MCPs); err != nil {
 		slog.Warn("MCP config generation failed, skipping", "err", err)
