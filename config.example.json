@@ -14,10 +14,6 @@
       "openai_api_key": ""
     }
   ],
-  "memory": {
-    "provider": "claude-mem",
-    "endpoint": "http://localhost:47432"
-  },
   "heartbeat": {
     "enabled": true,
     "interval_minutes": 15,
