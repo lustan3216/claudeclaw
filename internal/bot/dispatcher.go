@@ -697,9 +697,21 @@ func (d *Dispatcher) runBatch(ctx context.Context, chatID int64, topicID int, ba
 	})
 }
 
+// drainPending clears and discards all pending messages for a topic and marks it as not running.
+// Called on cancellation so queued messages are not auto-dispatched after a cancel.
+func (d *Dispatcher) drainPending(chatID int64, topicID int) {
+	key := chatTopicKey{chatID, topicID}
+	d.pendingMu.Lock()
+	if tq := d.topicPending[key]; tq != nil {
+		tq.msgs = nil
+		tq.running = false
+	}
+	d.pendingMu.Unlock()
+}
+
 // dispatchJob submits a job to the runner and handles Telegram replies.
 // replyToID is the ID of the last message that triggered this job; it is quoted in the reply.
-// onDone is called when the job completes (all paths); pass nil if not needed.
+// onDone is called when the job completes successfully; pass nil if not needed.
 func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int, replyToID int, prompt string, mode runner.TaskMode, onDone func()) {
 	// React with 👀 on receipt
 	d.react(chatID, replyToID, "👀")
@@ -734,13 +746,12 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 
 		go func() {
 			defer cleanup()
-			if onDone != nil {
-				defer onDone()
-			}
 			result := <-resultCh
 			if result.Err != nil {
 				if jobCtx.Err() != nil {
-					return // already cancelled via reaction; reply sent by handleReactionCancel
+					// Cancelled — discard any pending messages for this topic and release the queue
+					d.drainPending(chatID, topicID)
+					return // reply already sent by handleReactionCancel
 				}
 				d.replyTo(chatID, topicID, replyToID, fmt.Sprintf("❌ Background job failed: %v", result.Err))
 				return
@@ -749,13 +760,23 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 			d.sendOutputTo(chatID, topicID, replyToID, result.Output)
 			d.maybeUpdateMemory(ctx, chatID, topicID)
 			d.maybeSummarizeSession(ctx, chatID, topicID, result.InputTokens)
+			if onDone != nil {
+				onDone()
+			}
 		}()
 		return
 	}
 
-	// Foreground: call onDone when this function returns (all paths)
+	// Foreground: call onDone only on non-cancelled completion
 	if onDone != nil {
-		defer onDone()
+		defer func() {
+			if jobCtx.Err() != nil {
+				// Cancelled — discard pending messages and release the queue
+				d.drainPending(chatID, topicID)
+				return
+			}
+			onDone()
+		}()
 	}
 
 	// Foreground job: keep sending typing action until complete, then reply with result
