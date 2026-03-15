@@ -762,13 +762,14 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 	resultCh := make(chan runner.Result, 1)
 	d.runnerMgr.Submit(runner.Job{
 		Ctx:       jobCtx,
-		Workspace: d.workspace,
-		BotName:   d.botCfg.Name,
-		ChatID:    chatID,
-		TopicID:   topicID,
-		Prompt:    prompt,
-		Mode:      mode,
-		ResultCh:  resultCh,
+		Workspace:        d.workspace,
+		BotName:          d.botCfg.Name,
+		ChatID:           chatID,
+		TopicID:          topicID,
+		Prompt:           prompt,
+		Mode:             mode,
+		AnthropicAPIKeys: d.botCfg.AnthropicAPIKeys,
+		ResultCh:         resultCh,
 	})
 
 	// Renew typing every 4s until the result is ready
