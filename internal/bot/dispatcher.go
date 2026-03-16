@@ -19,8 +19,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
-	"unicode/utf8"
 	"time"
 
 	"github.com/mymmrac/telego"
@@ -80,9 +78,6 @@ type Dispatcher struct {
 	cancelMu       sync.Mutex
 	cancelReactions map[int]cancelEntry // trigger message ID → cancel info (for reaction cancellation)
 
-	progressMu       sync.Mutex
-	progressCallbacks map[int]*atomic.Pointer[string] // status message ID → lastActivity (for 📋 button)
-
 	pendingMu    sync.Mutex
 	topicPending map[chatTopicKey]*topicQueue
 
@@ -106,10 +101,9 @@ func NewDispatcher(
 	workspace string,
 ) *Dispatcher {
 	return &Dispatcher{
-		completionCounts:  make(map[chatTopicKey]int),
-		cancelReactions:   make(map[int]cancelEntry),
-		progressCallbacks: make(map[int]*atomic.Pointer[string]),
-		topicPending:      make(map[chatTopicKey]*topicQueue),
+		completionCounts: make(map[chatTopicKey]int),
+		cancelReactions:  make(map[int]cancelEntry),
+		topicPending:     make(map[chatTopicKey]*topicQueue),
 		runnerMgr:        runnerMgr,
 		sessionMgr:       sessionMgr,
 		cfg:              cfg,
@@ -133,12 +127,6 @@ func (d *Dispatcher) Handle(ctx context.Context, update telego.Update) {
 	// Handle reaction cancellation: user reacts with 😱 or 😭 to cancel an in-progress task
 	if update.MessageReaction != nil {
 		d.handleReactionCancel(update.MessageReaction)
-		return
-	}
-
-	// Handle inline keyboard callbacks (📋 View progress button)
-	if update.CallbackQuery != nil {
-		d.handleProgressCallback(update.CallbackQuery)
 		return
 	}
 
@@ -761,89 +749,30 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 
 	// Background job: reply immediately to user, execute asynchronously
 	if mode == runner.ModeBackground {
-		title := jobTitle(prompt, 40)
-		statusMsgID := d.replyToWithButton(chatID, topicID, replyToID,
-			fmt.Sprintf("⏳ Running in background: %s", title),
-			"📋 View progress", "bg_progress")
-
-		lastActivity := &atomic.Pointer[string]{}
-
-		// Register for 📋 button callbacks
-		if statusMsgID > 0 {
-			d.progressMu.Lock()
-			d.progressCallbacks[statusMsgID] = lastActivity
-			d.progressMu.Unlock()
-		}
+		d.replyTo(chatID, topicID, replyToID, "⏳ Processing in the background, will notify you when done.")
 
 		resultCh := make(chan runner.Result, 1)
 		d.runnerMgr.Submit(runner.Job{
-			Ctx:              jobCtx,
-			Workspace:        d.workspace,
-			BotName:          d.botCfg.Name,
-			ChatID:           chatID,
-			TopicID:          topicID,
-			Prompt:           prompt,
+			Ctx:               jobCtx,
+			Workspace:         d.workspace,
+			BotName:           d.botCfg.Name,
+			ChatID:            chatID,
+			TopicID:           topicID,
+			Prompt:            prompt,
 			Mode:              mode,
 			AnthropicAPIKeys:  d.botCfg.AnthropicAPIKeys,
 			ClaudeCredentials: d.botCfg.ClaudeCredentials,
 			Model:             d.botCfg.Model,
-			LastActivity:     lastActivity,
 			ResultCh:          resultCh,
 		})
-
-		// background long-task notifications
-		bgTaskStart := time.Now()
-		bgLongTaskDone := make(chan struct{})
-		go func() {
-			select {
-			case <-bgLongTaskDone:
-				return
-			case <-jobCtx.Done():
-				return
-			case <-time.After(20 * time.Second):
-				msg := fmt.Sprintf("⏳ %s — still running...", title)
-				if p := lastActivity.Load(); p != nil && *p != "" {
-					msg += fmt.Sprintf("\nLast action: %s", truncateActivity(*p))
-				}
-				d.replyTo(chatID, topicID, 0, msg)
-			}
-			ticker := time.NewTicker(60 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-bgLongTaskDone:
-					return
-				case <-jobCtx.Done():
-					return
-				case <-ticker.C:
-					elapsed := int(time.Since(bgTaskStart).Seconds())
-					msg := fmt.Sprintf("⏳ %s — still running (%ds)", title, elapsed)
-					if p := lastActivity.Load(); p != nil && *p != "" {
-						msg += fmt.Sprintf("\nLast action: %s", truncateActivity(*p))
-					}
-					d.replyTo(chatID, topicID, 0, msg)
-				}
-			}
-		}()
 
 		go func() {
 			defer cleanup()
 			result := <-resultCh
-			close(bgLongTaskDone)
-
-			// Remove 📋 button and unregister callback
-			if statusMsgID > 0 {
-				d.progressMu.Lock()
-				delete(d.progressCallbacks, statusMsgID)
-				d.progressMu.Unlock()
-				d.removeInlineKeyboard(chatID, topicID, statusMsgID)
-			}
-
 			if result.Err != nil {
 				if jobCtx.Err() != nil {
-					// Cancelled — discard any pending messages for this topic and release the queue
 					d.drainPending(chatID, topicID)
-					return // reply already sent by handleReactionCancel
+					return
 				}
 				d.replyTo(chatID, topicID, replyToID, fmt.Sprintf("❌ Background job failed: %v", result.Err))
 				return
@@ -887,8 +816,6 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 		slog.Warn("SendChatAction failed", "err", err, "chat_id", chatID, "topic_id", topicID)
 	}
 
-	title := jobTitle(prompt, 40)
-	lastActivity := &atomic.Pointer[string]{}
 	resultCh := make(chan runner.Result, 1)
 	d.runnerMgr.Submit(runner.Job{
 		Ctx:               jobCtx,
@@ -901,7 +828,6 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 		AnthropicAPIKeys:  d.botCfg.AnthropicAPIKeys,
 		ClaudeCredentials: d.botCfg.ClaudeCredentials,
 		Model:             d.botCfg.Model,
-		LastActivity:      lastActivity,
 		ResultCh:          resultCh,
 	})
 
@@ -932,69 +858,8 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 		}
 	}()
 
-	// notify user after 20s; edit the same message on each 60s tick to avoid spam
-	taskStart := time.Now()
-	longTaskDone := make(chan struct{})
-	var notifMsgID atomic.Int64 // stores the status message ID once sent (0 = not yet sent)
-	go func() {
-		buildText := func(elapsed int) string {
-			var msg string
-			if elapsed > 0 {
-				msg = fmt.Sprintf("⏳ %s — still running (%ds)", title, elapsed)
-			} else {
-				msg = fmt.Sprintf("⏳ %s — still running...", title)
-			}
-			if p := lastActivity.Load(); p != nil && *p != "" {
-				msg += fmt.Sprintf("\nLast action: %s", truncateActivity(*p))
-			}
-			return msg
-		}
-		select {
-		case <-longTaskDone:
-			return
-		case <-jobCtx.Done():
-			return
-		case <-time.After(20 * time.Second):
-			msgID := d.replyToWithButton(chatID, topicID, 0, buildText(0), "📋 View progress", "bg_progress")
-			if msgID > 0 {
-				notifMsgID.Store(int64(msgID))
-				d.progressMu.Lock()
-				d.progressCallbacks[msgID] = lastActivity
-				d.progressMu.Unlock()
-			}
-		}
-		ticker := time.NewTicker(60 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-longTaskDone:
-				return
-			case <-jobCtx.Done():
-				return
-			case <-ticker.C:
-				elapsed := int(time.Since(taskStart).Seconds())
-				text := buildText(elapsed)
-				if mid := int(notifMsgID.Load()); mid > 0 {
-					// Edit in-place instead of sending a new message
-					d.editMessageWithButton(chatID, mid, text, "📋 View progress", "bg_progress")
-				} else {
-					d.replyTo(chatID, topicID, 0, text)
-				}
-			}
-		}
-	}()
-
 	result := <-resultCh
-	close(longTaskDone)
 	close(typingDone)
-
-	// Clean up the long-task notification message if one was sent
-	if mid := int(notifMsgID.Load()); mid > 0 {
-		d.progressMu.Lock()
-		delete(d.progressCallbacks, mid)
-		d.progressMu.Unlock()
-		d.removeInlineKeyboard(chatID, topicID, mid)
-	}
 
 	// Check cancellation BEFORE calling cleanup (which itself calls jobCancel).
 	// If already cancelled (user reacted with 😱/😭), handleReactionCancel already sent a reply.
@@ -1538,111 +1403,4 @@ func currentYearMonth() string {
 	return time.Now().UTC().Format("2006-01")
 }
 
-// replyToWithButton sends a message with a single inline button and returns the sent message ID (0 on failure).
-func (d *Dispatcher) replyToWithButton(chatID int64, topicID, replyToID int, text, buttonLabel, callbackData string) int {
-	params := &telego.SendMessageParams{
-		ChatID: telego.ChatID{ID: chatID},
-		Text:   text,
-		ReplyMarkup: &telego.InlineKeyboardMarkup{
-			InlineKeyboard: [][]telego.InlineKeyboardButton{
-				{{Text: buttonLabel, CallbackData: callbackData}},
-			},
-		},
-	}
-	if topicID > 0 {
-		params.MessageThreadID = topicID
-	}
-	if replyToID > 0 {
-		params.ReplyParameters = &telego.ReplyParameters{MessageID: replyToID}
-	}
-	sent, err := d.botAPI.SendMessage(params)
-	if err != nil {
-		slog.Warn("replyToWithButton: send failed", "err", err)
-		d.replyTo(chatID, topicID, replyToID, text) // fallback without button
-		return 0
-	}
-	return sent.MessageID
-}
-
-// editMessageWithButton edits an existing message's text while keeping a single inline button.
-func (d *Dispatcher) editMessageWithButton(chatID int64, messageID int, text, buttonLabel, callbackData string) {
-	if _, err := d.botAPI.EditMessageText(&telego.EditMessageTextParams{
-		ChatID:    telego.ChatID{ID: chatID},
-		MessageID: messageID,
-		Text:      text,
-		ReplyMarkup: &telego.InlineKeyboardMarkup{
-			InlineKeyboard: [][]telego.InlineKeyboardButton{
-				{{Text: buttonLabel, CallbackData: callbackData}},
-			},
-		},
-	}); err != nil {
-		slog.Debug("editMessageWithButton: edit failed", "err", err)
-	}
-}
-
-// removeInlineKeyboard edits a message to strip its inline keyboard.
-func (d *Dispatcher) removeInlineKeyboard(chatID int64, _ int, messageID int) {
-	if _, err := d.botAPI.EditMessageReplyMarkup(&telego.EditMessageReplyMarkupParams{
-		ChatID:    telego.ChatID{ID: chatID},
-		MessageID: messageID,
-	}); err != nil {
-		slog.Debug("removeInlineKeyboard: edit failed (message may already be gone)", "err", err)
-	}
-}
-
-// handleProgressCallback answers a 📋 View progress callback query with the current last activity.
-func (d *Dispatcher) handleProgressCallback(cq *telego.CallbackQuery) {
-	if cq.Data != "bg_progress" || cq.Message == nil {
-		_ = d.botAPI.AnswerCallbackQuery(&telego.AnswerCallbackQueryParams{
-			CallbackQueryID: cq.ID,
-		})
-		return
-	}
-
-	msg, ok2 := cq.Message.(*telego.Message)
-	if !ok2 || msg == nil {
-		_ = d.botAPI.AnswerCallbackQuery(&telego.AnswerCallbackQueryParams{CallbackQueryID: cq.ID})
-		return
-	}
-	msgID := msg.MessageID
-	d.progressMu.Lock()
-	ptr, ok := d.progressCallbacks[msgID]
-	d.progressMu.Unlock()
-
-	var text string
-	if !ok {
-		text = "Job already completed."
-	} else if p := ptr.Load(); p == nil || *p == "" {
-		text = "Starting up, no output yet..."
-	} else {
-		text = truncateActivity(*p)
-	}
-
-	_ = d.botAPI.AnswerCallbackQuery(&telego.AnswerCallbackQueryParams{
-		CallbackQueryID: cq.ID,
-		Text:            text,
-		ShowAlert:       true,
-	})
-}
-
-// jobTitle 從 prompt 提取短標題（第一行，最多 maxRunes 個字元）
-func jobTitle(prompt string, maxRunes int) string {
-	first := strings.SplitN(strings.TrimSpace(prompt), "\n", 2)[0]
-	first = strings.TrimSpace(first)
-	if utf8.RuneCountInString(first) <= maxRunes {
-		return first
-	}
-	runes := []rune(first)
-	return string(runes[:maxRunes]) + "..."
-}
-
-// truncateActivity 截斷最後活動行至最多 80 個字元，避免通知過長
-func truncateActivity(s string) string {
-	const max = 80
-	if utf8.RuneCountInString(s) <= max {
-		return s
-	}
-	runes := []rune(s)
-	return string(runes[:max]) + "..."
-}
 
