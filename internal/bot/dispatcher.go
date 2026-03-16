@@ -752,7 +752,7 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 	// Background job: reply immediately to user, execute asynchronously
 	if mode == runner.ModeBackground {
 		title := jobTitle(prompt, 40)
-		d.replyTo(chatID, topicID, replyToID, fmt.Sprintf("⏳ 背景執行中: %s", title))
+		d.replyTo(chatID, topicID, replyToID, fmt.Sprintf("⏳ Running in background: %s", title))
 
 		lastActivity := &atomic.Pointer[string]{}
 		resultCh := make(chan runner.Result, 1)
@@ -771,7 +771,7 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 			ResultCh:          resultCh,
 		})
 
-		// 背景任務也送長任務通知
+		// background long-task notifications
 		bgTaskStart := time.Now()
 		bgLongTaskDone := make(chan struct{})
 		go func() {
@@ -781,9 +781,9 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 			case <-jobCtx.Done():
 				return
 			case <-time.After(20 * time.Second):
-				msg := fmt.Sprintf("⏳ %s 還在跑，請稍候...", title)
+				msg := fmt.Sprintf("⏳ %s — still running...", title)
 				if p := lastActivity.Load(); p != nil && *p != "" {
-					msg += fmt.Sprintf("\n最後動作: %s", truncateActivity(*p))
+					msg += fmt.Sprintf("\nLast action: %s", truncateActivity(*p))
 				}
 				d.replyTo(chatID, topicID, 0, msg)
 			}
@@ -797,9 +797,9 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 					return
 				case <-ticker.C:
 					elapsed := int(time.Since(bgTaskStart).Seconds())
-					msg := fmt.Sprintf("⏳ %s 仍在執行中 (%ds)", title, elapsed)
+					msg := fmt.Sprintf("⏳ %s — still running (%ds)", title, elapsed)
 					if p := lastActivity.Load(); p != nil && *p != "" {
-						msg += fmt.Sprintf("\n最後動作: %s", truncateActivity(*p))
+						msg += fmt.Sprintf("\nLast action: %s", truncateActivity(*p))
 					}
 					d.replyTo(chatID, topicID, 0, msg)
 				}
@@ -903,7 +903,7 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 		}
 	}()
 
-	// 超過 20s 通知使用者，之後每 60s 回報一次進度
+	// notify user after 20s, then every 60s
 	taskStart := time.Now()
 	longTaskDone := make(chan struct{})
 	go func() {
@@ -913,9 +913,9 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 		case <-jobCtx.Done():
 			return
 		case <-time.After(20 * time.Second):
-			msg := fmt.Sprintf("⏳ %s 還在跑，請稍候...", title)
+			msg := fmt.Sprintf("⏳ %s — still running...", title)
 			if p := lastActivity.Load(); p != nil && *p != "" {
-				msg += fmt.Sprintf("\n最後動作: %s", truncateActivity(*p))
+				msg += fmt.Sprintf("\nLast action: %s", truncateActivity(*p))
 			}
 			d.replyTo(chatID, topicID, 0, msg)
 		}
@@ -929,9 +929,9 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 				return
 			case <-ticker.C:
 				elapsed := int(time.Since(taskStart).Seconds())
-				msg := fmt.Sprintf("⏳ %s 仍在執行中 (%ds)", title, elapsed)
+				msg := fmt.Sprintf("⏳ %s — still running (%ds)", title, elapsed)
 				if p := lastActivity.Load(); p != nil && *p != "" {
-					msg += fmt.Sprintf("\n最後動作: %s", truncateActivity(*p))
+					msg += fmt.Sprintf("\nLast action: %s", truncateActivity(*p))
 				}
 				d.replyTo(chatID, topicID, 0, msg)
 			}
