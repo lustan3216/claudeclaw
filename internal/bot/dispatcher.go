@@ -314,13 +314,24 @@ func (d *Dispatcher) handleCommand(ctx context.Context, msg *telego.Message, top
 	case "start", "help":
 		d.reply(chatID, topicID, fmt.Sprintf(
 			"⚡ *claudeclaw* `%s`\n\n"+
-				"/clear · /bg `<task>` · /status · /usage\n"+
-				"/models · /model `<name>`\n"+
-				"/adduser `<id>` · /update · /config\n"+
-				"😱 😭 react to cancel\n\n"+
-				"*Config keys*\n"+
-				"`auto_update` `security_level`\n\n"+
-				"`/set <key> <value>` · `/unset <key>`",
+				"*會話*\n"+
+				"`/clear` — 清除當前 session\n"+
+				"`/status` — 顯示狀態與版本\n"+
+				"`/usage` — 查看 token 用量\n\n"+
+				"*任務*\n"+
+				"`/bg <任務>` — 背景執行\n"+
+				"😱 😭 對訊息 react — 取消執行中任務\n\n"+
+				"*模型*\n"+
+				"`/models` — 列出可用模型\n"+
+				"`/model <名稱>` — 切換模型\n\n"+
+				"*設定*\n"+
+				"`/config` — 查看當前設定\n"+
+				"`/set <key> <value>` — 修改設定\n"+
+				"`/unset <key>` — 清除設定\n"+
+				"可設定的 key：`auto_update` · `security_level`\n\n"+
+				"*管理*\n"+
+				"`/adduser <id>` — 新增授權用戶\n"+
+				"`/update` — 拉取最新版本並重啟",
 			buildinfo.Version,
 		))
 	case "config":
