@@ -45,6 +45,7 @@ type Job struct {
 	Mode             TaskMode
 	AnthropicAPIKeys  []string                   // API keys to try in order; falls back to env ANTHROPIC_API_KEY if empty
 	ClaudeCredentials []config.ClaudeCredential  // OAuth credential sets; tried in order after API keys are exhausted
+	Model             string                     // model override passed as --model flag; empty = claude's default
 	ResultCh         chan<- Result               // caller listens on this channel for the result
 }
 
@@ -389,6 +390,10 @@ func (m *Manager) buildArgs(job Job, sessionID string) []string {
 	} else {
 		// New session: use JSON output format to capture session_id
 		args = append(args, "--output-format", "json")
+	}
+
+	if job.Model != "" {
+		args = append(args, "--model", job.Model)
 	}
 
 	// Single-shot prompt mode (non-interactive)

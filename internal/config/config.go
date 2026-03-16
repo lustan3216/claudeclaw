@@ -35,7 +35,8 @@ type BotConfig struct {
 	ClaudeCredentials   []ClaudeCredential `mapstructure:"claude_credentials"`   // OAuth credential sets for multi-account fallback
 	MemoryUpdateInterval   int `mapstructure:"memory_update_interval"`   // update memory.md every N successful completions; 0 = disabled
 	MemoryCompressInterval int `mapstructure:"memory_compress_interval"` // compress memory.md every N memory updates; 0 = disabled
-	MaxSessionTokens       int `mapstructure:"max_session_tokens"`       // reset session when input tokens exceed this; default 60000
+	MaxSessionTokens       int    `mapstructure:"max_session_tokens"`       // reset session when input tokens exceed this; default 60000
+	Model                  string `mapstructure:"model"`                    // claude model override (e.g. "claude-opus-4-5"); empty = claude's default
 }
 
 // QuietWindow defines a heartbeat quiet period (local time).

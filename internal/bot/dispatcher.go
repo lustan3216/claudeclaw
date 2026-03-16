@@ -386,9 +386,13 @@ func (d *Dispatcher) handleCommand(ctx context.Context, msg *telego.Message, top
 		if topicID > 0 {
 			topicInfo = fmt.Sprintf("Topic #%d", topicID)
 		}
+		model := d.botCfg.Model
+		if model == "" {
+			model = "default"
+		}
 		d.reply(chatID, topicID, fmt.Sprintf(
-			"Bot: %s\nWorkspace: %s\nSecurity: %s\nTopic: %s\nVersion: %s",
-			d.botCfg.Name, d.workspace, d.cfg.Security.Level, topicInfo, buildinfo.Version,
+			"Bot: %s\nWorkspace: %s\nSecurity: %s\nTopic: %s\nModel: %s\nVersion: %s",
+			d.botCfg.Name, d.workspace, d.cfg.Security.Level, topicInfo, model, buildinfo.Version,
 		))
 	case "bg":
 		// Force background mode
@@ -709,6 +713,7 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 			Mode:              mode,
 			AnthropicAPIKeys:  d.botCfg.AnthropicAPIKeys,
 			ClaudeCredentials: d.botCfg.ClaudeCredentials,
+			Model:             d.botCfg.Model,
 			ResultCh:          resultCh,
 		})
 
