@@ -403,10 +403,11 @@ func (d *Dispatcher) handleCommand(ctx context.Context, msg *telego.Message, top
 		}
 		d.dispatchJob(ctx, chatID, topicID, msg.MessageID, args, runner.ModeBackground, nil)
 	case "models":
-		available := []string{
-			"claude-opus-4-6",
-			"claude-sonnet-4-6",
-			"claude-haiku-4-5",
+		type modelEntry struct{ alias, full string }
+		available := []modelEntry{
+			{"opus", "claude-opus-4-6"},
+			{"sonnet", "claude-sonnet-4-6"},
+			{"haiku", "claude-haiku-4-5"},
 		}
 		current := d.botCfg.Model
 		if current == "" {
@@ -414,16 +415,18 @@ func (d *Dispatcher) handleCommand(ctx context.Context, msg *telego.Message, top
 		}
 		var lines []string
 		for _, m := range available {
-			if m == current {
-				lines = append(lines, "✓ "+m)
-			} else {
-				lines = append(lines, "  "+m)
+			mark := "  "
+			if current == m.alias || current == m.full {
+				mark = "✓ "
 			}
+			lines = append(lines, fmt.Sprintf("%s%-8s  %s", mark, m.alias, m.full))
 		}
 		if current == "default" {
-			lines = append(lines, "✓ default (claude's built-in default)")
+			lines = append(lines, "✓ default   (claude's built-in default)")
+		} else {
+			lines = append(lines, "  default   (claude's built-in default)")
 		}
-		d.reply(chatID, topicID, "Available models:\n"+strings.Join(lines, "\n")+"\n\nUse /model <name> to switch.")
+		d.reply(chatID, topicID, "Available models:\n"+strings.Join(lines, "\n")+"\n\nUse /model <alias> or /model <full-name>")
 	case "model":
 		if args == "" {
 			current := d.botCfg.Model
