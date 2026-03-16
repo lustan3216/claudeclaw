@@ -305,7 +305,7 @@ func parseCommand(msg *telego.Message) (cmd string, args string, ok bool) {
 	return "", "", false
 }
 
-// handleCommand handles built-in commands: /start /help /clear /status /bg /set /unset /config.
+// handleCommand handles built-in commands: /start /help /clear /status /bg /set /unset /config /models /model.
 func (d *Dispatcher) handleCommand(ctx context.Context, msg *telego.Message, topicID int, cmd string, args string) {
 	chatID := msg.Chat.ID
 	switch cmd {
@@ -313,6 +313,7 @@ func (d *Dispatcher) handleCommand(ctx context.Context, msg *telego.Message, top
 		d.reply(chatID, topicID, fmt.Sprintf(
 			"⚡ *claudeclaw* `%s`\n\n"+
 				"/clear · /bg `<task>` · /status · /usage\n"+
+				"/models · /model `<name>`\n"+
 				"/adduser `<id>` · /update · /config\n"+
 				"😱 😭 react to cancel\n\n"+
 				"*Config keys*\n"+
@@ -401,6 +402,40 @@ func (d *Dispatcher) handleCommand(ctx context.Context, msg *telego.Message, top
 			return
 		}
 		d.dispatchJob(ctx, chatID, topicID, msg.MessageID, args, runner.ModeBackground, nil)
+	case "models":
+		available := []string{
+			"claude-opus-4-6",
+			"claude-sonnet-4-6",
+			"claude-haiku-4-5",
+		}
+		current := d.botCfg.Model
+		if current == "" {
+			current = "default"
+		}
+		var lines []string
+		for _, m := range available {
+			if m == current {
+				lines = append(lines, "✓ "+m)
+			} else {
+				lines = append(lines, "  "+m)
+			}
+		}
+		if current == "default" {
+			lines = append(lines, "✓ default (claude's built-in default)")
+		}
+		d.reply(chatID, topicID, "Available models:\n"+strings.Join(lines, "\n")+"\n\nUse /model <name> to switch.")
+	case "model":
+		if args == "" {
+			current := d.botCfg.Model
+			if current == "" {
+				current = "default"
+			}
+			d.reply(chatID, topicID, fmt.Sprintf("Current model: %s\nUsage: /model <name>", current))
+			return
+		}
+		d.botCfg.Model = args
+		_ = d.sessionMgr.Clear(d.workspace, d.botCfg.Name, chatID, topicID)
+		d.reply(chatID, topicID, fmt.Sprintf("✓ Model set to %s, session reset.\n(restarting bot resets to config.json value)", args))
 	case "usage":
 		d.reply(chatID, topicID, d.buildUsageReport())
 	case "adduser":
