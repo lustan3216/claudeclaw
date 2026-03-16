@@ -27,6 +27,23 @@ const (
 	ModeBackground
 )
 
+// AgentEventType indicates what happened with a subagent.
+type AgentEventType int
+
+const (
+	AgentStarted   AgentEventType = iota // subagent spawned
+	AgentCompleted                        // subagent finished
+)
+
+// AgentEvent is emitted when Claude spawns or completes a subagent (Agent tool).
+type AgentEvent struct {
+	Type         AgentEventType
+	ToolUseID    string // unique ID for this subagent invocation
+	Description  string // short task description from input.description
+	SubagentType string // e.g. "Explore", "Plan", "general-purpose"
+	Content      string // result content (only set on AgentCompleted)
+}
+
 // Result holds the claude execution result.
 type Result struct {
 	Output      string
@@ -47,6 +64,7 @@ type Job struct {
 	ClaudeCredentials []config.ClaudeCredential  // OAuth credential sets; tried in order after API keys are exhausted
 	Model             string                     // model override passed as --model flag; empty = claude's default
 	ResultCh         chan<- Result               // caller listens on this channel for the result
+	AgentEventCh     chan<- AgentEvent           // optional: receives subagent start/complete events (nil = no events)
 }
 
 // claudeJSONOutput is the output structure of claude --output-format json.
@@ -110,6 +128,9 @@ func (m *Manager) Submit(job Job) {
 		slog.Debug("job enqueued", "workspace", job.Workspace, "chat_id", job.ChatID, "topic_id", job.TopicID, "mode", job.Mode)
 	case <-job.Ctx.Done():
 		slog.Warn("context cancelled before job could be enqueued", "workspace", job.Workspace)
+		if job.AgentEventCh != nil {
+			close(job.AgentEventCh)
+		}
 		if job.ResultCh != nil {
 			job.ResultCh <- Result{Err: job.Ctx.Err()}
 		}
@@ -138,6 +159,11 @@ func (m *Manager) getOrCreateQueue(key queueKey) chan Job {
 func (m *Manager) runQueue(key queueKey, q <-chan Job) {
 	for job := range q {
 		result := m.execute(job)
+		// Close agent event channel before sending result so dispatcher
+		// can drain all events before processing the final result.
+		if job.AgentEventCh != nil {
+			close(job.AgentEventCh)
+		}
 		if job.ResultCh != nil {
 			job.ResultCh <- result
 		}
@@ -269,6 +295,48 @@ func (m *Manager) execute(job Job) Result {
 	return lastResult
 }
 
+// streamEvent is the minimal structure for parsing stream-json NDJSON lines.
+type streamEvent struct {
+	Type      string          `json:"type"`
+	Subtype   string          `json:"subtype"`
+	SessionID string          `json:"session_id"`
+	Result    string          `json:"result"`
+	IsError   bool            `json:"is_error"`
+	Message   json.RawMessage `json:"message"`
+	Usage     json.RawMessage `json:"usage"`
+	Content   json.RawMessage `json:"content"` // for user-type tool_result
+}
+
+// streamMessage is the assistant/user message envelope.
+type streamMessage struct {
+	Content []streamContentBlock `json:"content"`
+}
+
+// streamContentBlock is a single content block inside a message.
+type streamContentBlock struct {
+	Type       string          `json:"type"`
+	Name       string          `json:"name,omitempty"`
+	ID         string          `json:"id,omitempty"`
+	Input      json.RawMessage `json:"input,omitempty"`
+	ToolUseID  string          `json:"tool_use_id,omitempty"`
+	ContentVal json.RawMessage `json:"content,omitempty"` // tool_result content (can be string or array)
+	Text       string          `json:"text,omitempty"`
+}
+
+// agentInput is the parsed input of an Agent tool_use call.
+type agentInput struct {
+	Description  string `json:"description"`
+	SubagentType string `json:"subagent_type"`
+}
+
+// streamResultUsage is the usage field in the result event.
+type streamResultUsage struct {
+	InputTokens            int `json:"input_tokens"`
+	CacheReadInputTokens   int `json:"cache_read_input_tokens"`
+	CacheCreateInputTokens int `json:"cache_creation_input_tokens"`
+	OutputTokens           int `json:"output_tokens"`
+}
+
 // executeWithKey runs the claude CLI with a specific API key or OAuth token (empty = use env var).
 func (m *Manager) executeWithKey(job Job, sessionID string, isNewSession bool, apiKey, oauthToken string) Result {
 	args := m.buildArgs(job, sessionID)
@@ -288,7 +356,6 @@ func (m *Manager) executeWithKey(job Job, sessionID string, isNewSession bool, a
 	cmd.Dir = job.Workspace
 	cmd.Env = filteredEnv(apiKey, oauthToken)
 
-	// Stream output
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return Result{Err: fmt.Errorf("failed to get stdout pipe: %w", err)}
@@ -302,18 +369,113 @@ func (m *Manager) executeWithKey(job Job, sessionID string, isNewSession bool, a
 		return Result{Err: fmt.Errorf("failed to start claude: %w", err)}
 	}
 
-	// Concurrently read stdout and stderr
-	var outputBuilder, stderrBuilder strings.Builder
+	// Track active Agent tool_use IDs to match tool_results back to subagent starts
+	activeAgents := make(map[string]agentInput)
+
+	// Parsed output fields extracted from stream events
+	var parsedSessionID string
+	var parsedResult string
+	var parsedUsage streamResultUsage
+	var gotResult bool
+
+	var stderrBuilder strings.Builder
+	var rawOutputBuilder strings.Builder
 	var wg sync.WaitGroup
 
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		scanner := bufio.NewScanner(stdout)
+		// stream-json can produce large lines (e.g. tool results with file content)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
 		for scanner.Scan() {
 			line := scanner.Text()
-			outputBuilder.WriteString(line)
-			outputBuilder.WriteByte('\n')
+			rawOutputBuilder.WriteString(line)
+			rawOutputBuilder.WriteByte('\n')
+
+			if !strings.HasPrefix(line, "{") {
+				continue
+			}
+
+			var evt streamEvent
+			if err := json.Unmarshal([]byte(line), &evt); err != nil {
+				continue
+			}
+
+			switch evt.Type {
+			case "system":
+				// init event carries session_id
+				if evt.Subtype == "init" && evt.SessionID != "" {
+					parsedSessionID = evt.SessionID
+				}
+
+			case "assistant":
+				// Check for Agent tool_use in assistant message content
+				if len(evt.Message) > 0 {
+					var msg streamMessage
+					if err := json.Unmarshal(evt.Message, &msg); err == nil {
+						for _, block := range msg.Content {
+							if block.Type == "tool_use" && block.Name == "Agent" && block.ID != "" {
+								var inp agentInput
+								if err := json.Unmarshal(block.Input, &inp); err == nil {
+									activeAgents[block.ID] = inp
+									if job.AgentEventCh != nil {
+										job.AgentEventCh <- AgentEvent{
+											Type:         AgentStarted,
+											ToolUseID:    block.ID,
+											Description:  inp.Description,
+											SubagentType: inp.SubagentType,
+										}
+									}
+									slog.Debug("subagent started",
+										"tool_use_id", block.ID,
+										"description", inp.Description,
+										"subagent_type", inp.SubagentType)
+								}
+							}
+						}
+					}
+				}
+
+			case "user":
+				// Check for tool_result matching an active Agent
+				if len(evt.Message) > 0 {
+					var msg streamMessage
+					if err := json.Unmarshal(evt.Message, &msg); err == nil {
+						for _, block := range msg.Content {
+							if block.Type == "tool_result" && block.ToolUseID != "" {
+								if inp, ok := activeAgents[block.ToolUseID]; ok {
+									content := extractToolResultContent(block.ContentVal)
+									if job.AgentEventCh != nil {
+										job.AgentEventCh <- AgentEvent{
+											Type:         AgentCompleted,
+											ToolUseID:    block.ToolUseID,
+											Description:  inp.Description,
+											SubagentType: inp.SubagentType,
+											Content:      content,
+										}
+									}
+									delete(activeAgents, block.ToolUseID)
+									slog.Debug("subagent completed",
+										"tool_use_id", block.ToolUseID,
+										"content_len", len(content))
+								}
+							}
+						}
+					}
+				}
+
+			case "result":
+				parsedResult = evt.Result
+				if len(evt.Usage) > 0 {
+					_ = json.Unmarshal(evt.Usage, &parsedUsage)
+				}
+				if evt.SessionID != "" {
+					parsedSessionID = evt.SessionID
+				}
+				gotResult = true
+			}
 		}
 	}()
 	go func() {
@@ -329,51 +491,70 @@ func (m *Manager) executeWithKey(job Job, sessionID string, isNewSession bool, a
 
 	wg.Wait()
 	if err := cmd.Wait(); err != nil {
-		// Context cancellation is normal — not treated as an error
 		if job.Ctx.Err() != nil {
 			return Result{Err: fmt.Errorf("job cancelled: %w", job.Ctx.Err())}
 		}
-		combinedOutput := outputBuilder.String() + stderrBuilder.String()
+		combinedOutput := rawOutputBuilder.String() + stderrBuilder.String()
 		return Result{
 			Output: combinedOutput,
 			Err:    fmt.Errorf("claude exited with error: %w", err),
 		}
 	}
 
-	rawOutput := strings.TrimSpace(outputBuilder.String())
-
-	// New session: parse JSON output to extract session_id and token usage
-	if isNewSession {
-		if jsonOut, err := parseJSONOutput(rawOutput); err == nil && jsonOut.SessionID != "" {
-			if err := m.sessions.Set(job.Workspace, job.BotName, job.ChatID, job.TopicID, jsonOut.SessionID); err != nil {
-				slog.Warn("failed to persist session ID", "err", err)
-			} else {
-				slog.Info("new session created and persisted",
-					"session_id", jsonOut.SessionID,
-					"bot", job.BotName,
-					"chat_id", job.ChatID,
-					"topic_id", job.TopicID)
-			}
-			totalIn := jsonOut.Usage.InputTokens + jsonOut.Usage.CacheReadInputTokens + jsonOut.Usage.CacheCreateInputTokens
-			return Result{Output: strings.TrimSpace(jsonOut.Result), InputTokens: totalIn}
+	// Persist session ID (works for both new and resumed sessions)
+	if parsedSessionID != "" && parsedSessionID != sessionID {
+		if err := m.sessions.Set(job.Workspace, job.BotName, job.ChatID, job.TopicID, parsedSessionID); err != nil {
+			slog.Warn("failed to persist session ID", "err", err)
+		} else {
+			slog.Info("session persisted",
+				"session_id", parsedSessionID,
+				"bot", job.BotName,
+				"chat_id", job.ChatID,
+				"topic_id", job.TopicID)
 		}
-		// JSON parse failed: fallback to legacy session ID extraction
-		if newID := extractSessionID(rawOutput); newID != "" {
-			if err := m.sessions.Set(job.Workspace, job.BotName, job.ChatID, job.TopicID, newID); err != nil {
-				slog.Warn("failed to persist session ID (fallback mode)", "err", err)
-			}
-		}
-		return Result{Output: rawOutput}
 	}
 
-	// Existing session (--resume mode): plain text output, check for new session ID (rotation case)
+	if gotResult {
+		totalIn := parsedUsage.InputTokens + parsedUsage.CacheReadInputTokens + parsedUsage.CacheCreateInputTokens
+		return Result{Output: strings.TrimSpace(parsedResult), InputTokens: totalIn}
+	}
+
+	// Fallback: no result event parsed — return raw output
+	rawOutput := strings.TrimSpace(rawOutputBuilder.String())
 	if newID := extractSessionID(rawOutput); newID != "" && newID != sessionID {
 		if err := m.sessions.Set(job.Workspace, job.BotName, job.ChatID, job.TopicID, newID); err != nil {
 			slog.Warn("failed to persist new session ID", "err", err)
 		}
 	}
-
 	return Result{Output: rawOutput}
+}
+
+// extractToolResultContent extracts readable text from a tool_result content field.
+// Content can be a JSON string, array of {type,text} objects, or raw bytes.
+func extractToolResultContent(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	// Try as string first
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	// Try as array of content blocks
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &blocks); err == nil {
+		var parts []string
+		for _, b := range blocks {
+			if b.Text != "" {
+				parts = append(parts, b.Text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+	return string(raw)
 }
 
 // buildArgs assembles the claude command-line arguments based on job config.
@@ -383,13 +564,11 @@ func (m *Manager) buildArgs(job Job, sessionID string) []string {
 	// Non-interactive mode must skip permission prompts; otherwise claude blocks waiting for terminal input.
 	args = append(args, "--dangerously-skip-permissions")
 
+	// Always use stream-json for real-time subagent event parsing
+	args = append(args, "--output-format", "stream-json", "--verbose")
+
 	if sessionID != "" {
-		// Existing session: use text output format to resume
-		args = append(args, "--output-format", "text")
 		args = append(args, "--resume", sessionID)
-	} else {
-		// New session: use JSON output format to capture session_id
-		args = append(args, "--output-format", "json")
 	}
 
 	if job.Model != "" {
