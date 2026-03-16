@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/mymmrac/telego"
@@ -387,13 +388,8 @@ func (d *Dispatcher) handleCommand(ctx context.Context, msg *telego.Message, top
 		_ = d.sessionMgr.Clear(d.workspace, d.botCfg.Name, chatID, topicID)
 		d.reply(chatID, topicID, fmt.Sprintf("✓ %s cleared, session reset", args))
 	case "update":
-		// Save notification info; send to the triggering chat after restart
-		d.saveRestartNotify(chatID, topicID)
-		d.reply(chatID, topicID, "⏳ Restarting and pulling latest version, please wait...")
-		go func() {
-			time.Sleep(500 * time.Millisecond)
-			os.Exit(0) // watchdog (run.sh) will auto git pull + rebuild + restart
-		}()
+		d.reply(chatID, topicID, "⏳ Pulling latest code and rebuilding...")
+		go d.selfUpdate(chatID, topicID)
 	case "clear":
 		if err := d.sessionMgr.Clear(d.workspace, d.botCfg.Name, chatID, topicID); err != nil {
 			slog.Error("failed to clear session", "err", err, "chat_id", chatID, "topic_id", topicID)
@@ -540,6 +536,58 @@ func (d *Dispatcher) triggerAutoUpdate() {
 		return
 	}
 	slog.Info("auto_update: new version ready, will take effect on next restart", "version", version)
+}
+
+// selfUpdate pulls latest code, rebuilds the binary, swaps it, and re-execs the process.
+// No run.sh watchdog needed — the binary restarts itself.
+func (d *Dispatcher) selfUpdate(chatID int64, topicID int) {
+	// 1. git pull
+	pullCmd := exec.Command("git", "-C", d.workspace, "pull", "origin", "main")
+	pullCmd.Env = os.Environ()
+	if out, err := pullCmd.CombinedOutput(); err != nil {
+		d.reply(chatID, topicID, fmt.Sprintf("❌ git pull failed: %s", strings.TrimSpace(string(out))))
+		return
+	}
+
+	// 2. go build
+	gobin := os.Getenv("GOBIN")
+	if gobin == "" {
+		gobin = "/data/go/go/bin/go"
+	}
+	versionOut, _ := exec.Command("git", "-C", d.workspace, "describe", "--tags", "--always").Output()
+	version := strings.TrimSpace(string(versionOut))
+	if version == "" {
+		version = "dev"
+	}
+
+	newBin := filepath.Join(d.workspace, "claudeclaw.new")
+	ldflags := "-X github.com/lustan3216/claudeclaw/internal/buildinfo.Version=" + version
+	buildCmd := exec.Command(gobin, "build", "-ldflags", ldflags, "-o", newBin, "./cmd/claudeclaw/")
+	buildCmd.Dir = d.workspace
+	buildCmd.Env = os.Environ()
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		d.reply(chatID, topicID, fmt.Sprintf("❌ Build failed: %s", strings.TrimSpace(string(out))))
+		_ = os.Remove(newBin)
+		return
+	}
+
+	// 3. swap binary
+	currentBin := filepath.Join(d.workspace, "claudeclaw")
+	if err := os.Rename(newBin, currentBin); err != nil {
+		d.reply(chatID, topicID, fmt.Sprintf("❌ Binary swap failed: %v", err))
+		return
+	}
+
+	// 4. save restart notification so the new process sends changelog
+	d.saveRestartNotify(chatID, topicID)
+
+	slog.Info("selfUpdate: re-execing", "version", version)
+
+	// 5. re-exec: replace current process with the new binary
+	if err := syscall.Exec(currentBin, os.Args, os.Environ()); err != nil {
+		// If exec fails, notify and continue running the old code
+		d.reply(chatID, topicID, fmt.Sprintf("❌ Restart failed: %v", err))
+	}
 }
 
 func (d *Dispatcher) buildUsageReport() string {
