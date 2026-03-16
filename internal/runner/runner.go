@@ -428,7 +428,7 @@ func (m *Manager) executeWithKey(job Job, sessionID string, isNewSession bool, a
 											SubagentType: inp.SubagentType,
 										}
 									}
-									slog.Debug("subagent started",
+									slog.Info("subagent started",
 										"tool_use_id", block.ID,
 										"description", inp.Description,
 										"subagent_type", inp.SubagentType)
@@ -457,7 +457,7 @@ func (m *Manager) executeWithKey(job Job, sessionID string, isNewSession bool, a
 										}
 									}
 									delete(activeAgents, block.ToolUseID)
-									slog.Debug("subagent completed",
+									slog.Info("subagent completed",
 										"tool_use_id", block.ToolUseID,
 										"content_len", len(content))
 								}
