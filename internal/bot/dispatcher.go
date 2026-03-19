@@ -51,9 +51,14 @@ type pendingJob struct {
 
 // topicQueue is the per-topic pending buffer and running state.
 type topicQueue struct {
-	msgs    []pendingJob
-	running bool
+	msgs     []pendingJob
+	running  bool
+	debounce *time.Timer // debounce timer for batching rapid messages
 }
+
+// debounceDelay is how long to wait for additional messages before dispatching.
+// Telegram splits long pastes into multiple messages; this groups them together.
+const debounceDelay = 800 * time.Millisecond
 
 // cancelEmojis — users can cancel an in-progress task by reacting with one of these emojis.
 var cancelEmojis = map[string]bool{"😱": true, "😭": true}
@@ -747,14 +752,29 @@ func (d *Dispatcher) submitOrQueue(ctx context.Context, chatID int64, topicID, r
 	}
 	tq.msgs = append(tq.msgs, pendingJob{replyToID, text, mode})
 	if tq.running {
+		// 任务正在执行，消息排队等任务完成后合并
 		d.pendingMu.Unlock()
 		return
 	}
-	tq.running = true
-	batch := tq.msgs
-	tq.msgs = nil
+	// 没有任务在跑，用 debounce 等待后续消息（Telegram 拆分长消息）
+	if tq.debounce != nil {
+		tq.debounce.Stop()
+	}
+	tq.debounce = time.AfterFunc(debounceDelay, func() {
+		d.pendingMu.Lock()
+		tq := d.topicPending[key]
+		if tq == nil || len(tq.msgs) == 0 {
+			d.pendingMu.Unlock()
+			return
+		}
+		tq.running = true
+		tq.debounce = nil
+		batch := tq.msgs
+		tq.msgs = nil
+		d.pendingMu.Unlock()
+		d.runBatch(ctx, chatID, topicID, batch)
+	})
 	d.pendingMu.Unlock()
-	go d.runBatch(ctx, chatID, topicID, batch)
 }
 
 // runBatch dispatches a batch of pending messages as a single combined job.
@@ -797,6 +817,10 @@ func (d *Dispatcher) drainPending(chatID int64, topicID int) {
 	key := chatTopicKey{chatID, topicID}
 	d.pendingMu.Lock()
 	if tq := d.topicPending[key]; tq != nil {
+		if tq.debounce != nil {
+			tq.debounce.Stop()
+			tq.debounce = nil
+		}
 		tq.msgs = nil
 		tq.running = false
 	}
