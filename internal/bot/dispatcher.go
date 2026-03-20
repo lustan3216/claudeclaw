@@ -70,6 +70,14 @@ type toolActivity struct {
 	summary      string // human-readable summary
 	subagentType string // only for Agent
 	done         bool
+	subagentText string                 // latest text output from subagent tailer
+	tailer       *runner.SubagentTailer // nil for non-Agent tools
+}
+
+// subagentTextUpdate relays text from a SubagentTailer into the event loop.
+type subagentTextUpdate struct {
+	toolUseID string
+	text      string
 }
 
 // httpClient for Whisper API calls, 60s timeout.
@@ -856,49 +864,25 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 	}
 
 	// Start tool event listener goroutine — edits the status message with live progress
+	// Also listens for subagent text updates from output file tailers
 	agentDone := make(chan struct{})
+	subagentTextCh := make(chan subagentTextUpdate, 16)
 	go func() {
 		defer close(agentDone)
 		var activities []toolActivity
 		var lastText string
-		for evt := range toolEventCh {
-			slog.Debug("tool event received in dispatcher",
-				"type", evt.Type,
-				"tool", evt.ToolName,
-				"summary", evt.Summary,
-				"tool_use_id", evt.ToolUseID)
-			switch evt.Type {
-			case runner.ToolStarted:
-				activities = append(activities, toolActivity{
-					toolUseID:    evt.ToolUseID,
-					toolName:     evt.ToolName,
-					summary:      evt.Summary,
-					subagentType: evt.SubagentType,
-				})
-			case runner.ToolCompleted:
-				for i := range activities {
-					if activities[i].toolUseID == evt.ToolUseID {
-						activities[i].done = true
-						break
-					}
-				}
-			}
-			// 构建进度文本
-			text := d.buildProgressText(activities, mode == runner.ModeBackground)
+		var lastEditTime time.Time
+		var pendingFlush *time.Timer
+
+		// editMessage 实际执行 Telegram 消息编辑
+		editMessage := func(text string) {
 			if text == lastText {
-				continue // 避免重复编辑相同内容
+				return
 			}
 			lastText = text
-			slog.Debug("updating progress message",
-				"status_msg_id", statusMsgID,
-				"activities", len(activities),
-				"text_len", len(text))
 			if statusMsgID == 0 {
-				// 前台任务：首次工具事件时发送新消息
 				statusMsgID = d.replyTo(chatID, topicID, replyToID, text)
-				slog.Debug("sent new progress message", "msg_id", statusMsgID)
 			} else {
-				// 编辑已有的状态消息
 				_, err := d.botAPI.EditMessageText(&telego.EditMessageTextParams{
 					ChatID:    telego.ChatID{ID: chatID},
 					MessageID: statusMsgID,
@@ -909,6 +893,105 @@ func (d *Dispatcher) dispatchJob(ctx context.Context, chatID int64, topicID int,
 					slog.Warn("failed to edit progress message", "err", err, "msg_id", statusMsgID)
 				}
 			}
+			lastEditTime = time.Now()
+		}
+
+		// throttledEdit 限流编辑（最少间隔 2 秒）
+		throttledEdit := func(text string) {
+			if text == lastText {
+				return
+			}
+			sinceLastEdit := time.Since(lastEditTime)
+			if sinceLastEdit >= 2*time.Second {
+				editMessage(text)
+				return
+			}
+			// 延迟到 2 秒后刷新
+			if pendingFlush != nil {
+				pendingFlush.Stop()
+			}
+			capturedText := text
+			pendingFlush = time.AfterFunc(2*time.Second-sinceLastEdit, func() {
+				subagentTextCh <- subagentTextUpdate{toolUseID: "_flush", text: capturedText}
+			})
+		}
+
+		toolEventOpen := true
+		for toolEventOpen {
+			select {
+			case evt, ok := <-toolEventCh:
+				if !ok {
+					toolEventOpen = false
+					// 最终刷新
+					text := d.buildProgressText(activities, mode == runner.ModeBackground)
+					editMessage(text)
+					continue
+				}
+				slog.Debug("tool event received in dispatcher",
+					"type", evt.Type,
+					"tool", evt.ToolName,
+					"summary", evt.Summary,
+					"tool_use_id", evt.ToolUseID)
+				switch evt.Type {
+				case runner.ToolStarted:
+					act := toolActivity{
+						toolUseID:    evt.ToolUseID,
+						toolName:     evt.ToolName,
+						summary:      evt.Summary,
+						subagentType: evt.SubagentType,
+					}
+					// 为 Agent 工具启动 output file tailer
+					if evt.ToolName == "Agent" && evt.SessionID != "" {
+						tailer := runner.NewSubagentTailer(jobCtx, evt.Workspace, evt.SessionID)
+						act.tailer = tailer
+						go tailer.Start()
+						go func(toolUseID string, ch <-chan string) {
+							for text := range ch {
+								subagentTextCh <- subagentTextUpdate{toolUseID: toolUseID, text: text}
+							}
+						}(evt.ToolUseID, tailer.TextCh())
+					}
+					activities = append(activities, act)
+				case runner.ToolCompleted:
+					for i := range activities {
+						if activities[i].toolUseID == evt.ToolUseID {
+							activities[i].done = true
+							if activities[i].tailer != nil {
+								activities[i].tailer.Stop()
+								activities[i].tailer = nil
+							}
+							break
+						}
+					}
+				}
+				text := d.buildProgressText(activities, mode == runner.ModeBackground)
+				throttledEdit(text)
+
+			case update := <-subagentTextCh:
+				if update.toolUseID == "_flush" {
+					// 延迟刷新: text 字段携带完整消息文本
+					editMessage(update.text)
+					continue
+				}
+				for i := range activities {
+					if activities[i].toolUseID == update.toolUseID {
+						activities[i].subagentText = update.text
+						break
+					}
+				}
+				text := d.buildProgressText(activities, mode == runner.ModeBackground)
+				throttledEdit(text)
+			}
+		}
+		// 停止所有剩余 tailers
+		for i := range activities {
+			if activities[i].tailer != nil {
+				activities[i].tailer.Stop()
+				activities[i].tailer = nil
+			}
+		}
+		if pendingFlush != nil {
+			pendingFlush.Stop()
 		}
 	}()
 
@@ -1103,6 +1186,11 @@ func (d *Dispatcher) buildProgressText(activities []toolActivity, isBackground b
 				agentType = "general"
 			}
 			b.WriteString(fmt.Sprintf("%s %s _(%s)_\n", icon, escapeMarkdown(a.summary), escapeMarkdown(agentType)))
+			// 显示 subagent 最新文本输出（未完成时）
+			if a.subagentText != "" && !a.done {
+				truncated := truncateSubagentText(a.subagentText, 300)
+				b.WriteString(fmt.Sprintf("   └ %s\n", escapeMarkdown(truncated)))
+			}
 		} else {
 			// 其他工具紧凑显示
 			summary := a.summary
@@ -1114,6 +1202,29 @@ func (d *Dispatcher) buildProgressText(activities []toolActivity, isBackground b
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// truncateSubagentText truncates subagent text for display in Telegram progress messages.
+// Keeps only the last portion if multi-line, and caps total length.
+func truncateSubagentText(s string, maxLen int) string {
+	// 去掉首尾空白
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	// 取最后几行（最新输出通常在末尾）
+	lines := strings.Split(s, "\n")
+	if len(lines) > 3 {
+		lines = lines[len(lines)-3:]
+		s = "…\n" + strings.Join(lines, "\n")
+	}
+	// 截断总长度
+	runes := []rune(s)
+	if len(runes) > maxLen {
+		s = string(runes[len(runes)-maxLen:])
+		s = "…" + s
+	}
+	return s
 }
 
 // escapeMarkdown escapes special Markdown characters for Telegram MarkdownV1.

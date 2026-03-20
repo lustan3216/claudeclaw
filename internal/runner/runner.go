@@ -42,6 +42,8 @@ type ToolEvent struct {
 	ToolName     string // tool name: "Agent", "Read", "Bash", "Edit", etc.
 	Summary      string // human-readable summary of what this tool call does
 	SubagentType string // only for Agent tool: e.g. "Explore", "Plan"
+	SessionID    string // session ID for locating subagent output files
+	Workspace    string // workspace path for constructing the tasks dir path
 }
 
 // Result holds the claude execution result.
@@ -517,6 +519,8 @@ func (m *Manager) executeWithKey(job Job, sessionID string, isNewSession bool, a
 										var inp agentInput
 										_ = json.Unmarshal(block.Input, &inp)
 										te.SubagentType = inp.SubagentType
+										te.SessionID = parsedSessionID
+										te.Workspace = job.Workspace
 									}
 									job.ToolEventCh <- te
 								}
